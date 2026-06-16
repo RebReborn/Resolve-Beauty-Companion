@@ -280,18 +280,9 @@ class BeautyFilterEngine:
         fill_features(LIPS_INDICES)
         
         # Landmarked face area minus features
-        skin_face_mask = cv2.bitwise_and(face_mask, cv2.bitwise_not(exclude_mask))
+        final_skin_mask = cv2.bitwise_and(face_mask, cv2.bitwise_not(exclude_mask))
         
-        # 3. YCrCb Skin Color Detection
-        ycrcb = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)
-        lower_skin = np.array([0, 133, 77], dtype=np.uint8)
-        upper_skin = np.array([255, 173, 127], dtype=np.uint8)
-        color_skin_mask = cv2.inRange(ycrcb, lower_skin, upper_skin)
-        
-        # Intersect face region with skin color detection
-        final_skin_mask = cv2.bitwise_and(skin_face_mask, color_skin_mask)
-        
-        # 4. Soften and feather the skin mask to prevent hard edges
+        # Soften and feather the skin mask to prevent hard edges
         feather_size = int(max(w, h) * 0.012) | 1
         if feather_size < 3:
             feather_size = 3
