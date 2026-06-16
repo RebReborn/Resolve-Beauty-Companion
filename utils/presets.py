@@ -4,6 +4,7 @@ import os
 DEFAULT_PRESETS = {
     "Natural Glow": {
         "skin_smoothing": 0.35,
+        "skin_texture_recovery": 0.30,
         "blush_warmth": 0.20,
         "skin_brightening": 0.15,
         "eye_enhancement": 0.30,
@@ -22,6 +23,7 @@ DEFAULT_PRESETS = {
     },
     "Hollywood Smooth": {
         "skin_smoothing": 0.65,
+        "skin_texture_recovery": 0.35,
         "blush_warmth": 0.30,
         "skin_brightening": 0.25,
         "eye_enhancement": 0.50,
@@ -40,6 +42,7 @@ DEFAULT_PRESETS = {
     },
     "High Glamour": {
         "skin_smoothing": 0.80,
+        "skin_texture_recovery": 0.40,
         "blush_warmth": 0.50,
         "skin_brightening": 0.40,
         "eye_enhancement": 0.65,
@@ -58,6 +61,7 @@ DEFAULT_PRESETS = {
     },
     "Subtle Polish": {
         "skin_smoothing": 0.15,
+        "skin_texture_recovery": 0.20,
         "blush_warmth": 0.10,
         "skin_brightening": 0.05,
         "eye_enhancement": 0.15,
@@ -76,6 +80,7 @@ DEFAULT_PRESETS = {
     },
     "Default Reset": {
         "skin_smoothing": 0.00,
+        "skin_texture_recovery": 0.00,
         "blush_warmth": 0.00,
         "skin_brightening": 0.00,
         "eye_enhancement": 0.00,
@@ -116,6 +121,7 @@ def load_preset_from_file(filepath):
         
         required_keys = {
             "skin_smoothing": 0.0,
+            "skin_texture_recovery": 0.0,
             "blush_warmth": 0.0,
             "skin_brightening": 0.0,
             "eye_enhancement": 0.0,

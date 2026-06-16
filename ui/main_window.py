@@ -186,6 +186,7 @@ class MainWindow(QMainWindow):
         
         # Sliders declarations
         self.slider_smoothing = PrecisionSlider("Skin Smoothing")
+        self.slider_texture_recovery = PrecisionSlider("Skin Texture Recovery", default_val=30)
         self.slider_brightening = PrecisionSlider("Skin Brightening")
         self.slider_blush = PrecisionSlider("Blush / Warmth")
         self.slider_eye = PrecisionSlider("Eye Enhancement")
@@ -193,6 +194,7 @@ class MainWindow(QMainWindow):
         
         # Add to layout
         sliders_layout.addWidget(self.slider_smoothing)
+        sliders_layout.addWidget(self.slider_texture_recovery)
         sliders_layout.addWidget(self.slider_brightening)
         sliders_layout.addWidget(self.slider_blush)
         sliders_layout.addWidget(self.slider_undereye)
@@ -200,6 +202,7 @@ class MainWindow(QMainWindow):
         
         # Connect change signals to update preview
         self.slider_smoothing.valueChanged.connect(self._on_slider_changed)
+        self.slider_texture_recovery.valueChanged.connect(self._on_slider_changed)
         self.slider_brightening.valueChanged.connect(self._on_slider_changed)
         self.slider_blush.valueChanged.connect(self._on_slider_changed)
         self.slider_eye.valueChanged.connect(self._on_slider_changed)
@@ -484,6 +487,7 @@ class MainWindow(QMainWindow):
     def get_slider_params(self):
         return {
             "skin_smoothing": self.slider_smoothing.value(),
+            "skin_texture_recovery": self.slider_texture_recovery.value(),
             "blush_warmth": self.slider_blush.value(),
             "skin_brightening": self.slider_brightening.value(),
             "eye_enhancement": self.slider_eye.value(),
@@ -504,6 +508,7 @@ class MainWindow(QMainWindow):
     def update_sliders_ui(self, params):
         # Block signals temporarily to prevent loop updates
         self.slider_smoothing.blockSignals(True)
+        self.slider_texture_recovery.blockSignals(True)
         self.slider_brightening.blockSignals(True)
         self.slider_blush.blockSignals(True)
         self.slider_eye.blockSignals(True)
@@ -521,6 +526,7 @@ class MainWindow(QMainWindow):
         self.slider_look_intensity.blockSignals(True)
         
         self.slider_smoothing.setValue(params.get("skin_smoothing", 0.0))
+        self.slider_texture_recovery.setValue(params.get("skin_texture_recovery", 0.0))
         self.slider_brightening.setValue(params.get("skin_brightening", 0.0))
         self.slider_blush.setValue(params.get("blush_warmth", 0.0))
         self.slider_eye.setValue(params.get("eye_enhancement", 0.0))
@@ -539,6 +545,7 @@ class MainWindow(QMainWindow):
         self.slider_look_intensity.setValue(params.get("look_intensity", 1.0))
         
         self.slider_smoothing.blockSignals(False)
+        self.slider_texture_recovery.blockSignals(False)
         self.slider_brightening.blockSignals(False)
         self.slider_blush.blockSignals(False)
         self.slider_eye.blockSignals(False)

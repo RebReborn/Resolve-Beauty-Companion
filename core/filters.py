@@ -38,6 +38,12 @@ class BeautyFilterEngine:
             num_faces=2
         )
         self.landmarker = vision.FaceLandmarker.create_from_options(options)
+        
+        # Temporal landmark tracking history for raw and warped passes (anti-jitter)
+        self.face_history_raw = {}
+        self.face_history_warped = {}
+        self.next_id_raw = 0
+        self.next_id_warped = 0
 
     def process_frame(self, image, params, preview_width=None):
         """
@@ -62,6 +68,11 @@ class BeautyFilterEngine:
             image = cv2.resize(image, (preview_width, new_h), interpolation=cv2.INTER_AREA)
             
         processed = image.copy()
+        h, w = processed.shape[:2]
+        
+        # Initialize temporal history tracking maps for current frame
+        self.new_history_raw = {}
+        self.new_history_warped = {}
         
         # Convert OpenCV BGR image to RGB order and wrap in mp.Image
         rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -75,7 +86,16 @@ class BeautyFilterEngine:
             color_look = params.get('color_look', 'None')
             if color_look != 'None':
                 processed = self.apply_color_filter(processed, color_look, params.get('look_intensity', 1.0))
+            # Clean up history if tracking is completely lost
+            self.face_history_raw = {}
+            self.face_history_warped = {}
             return processed
+            
+        # Smooth raw landmarks coordinates
+        raw_faces_coords = []
+        for face_landmarks in results.face_landmarks:
+            coords = self.get_smoothed_coords(face_landmarks, w, h, channel='raw')
+            raw_faces_coords.append(coords)
             
         # 1. Apply face reshaping warps (applied directly to the image coordinates)
         # We only warp if any warp strength is above 0
@@ -86,7 +106,7 @@ class BeautyFilterEngine:
         lips_p = params.get('lips_plump', 0.0)
         
         if nose_r > 0.001 or cheeks_r > 0.001 or forehead_r > 0.001 or eye_e > 0.001 or lips_p > 0.001:
-            processed = self.apply_reshape_warps(processed, results.face_landmarks, nose_r, cheeks_r, forehead_r, eye_e, lips_p)
+            processed = self.apply_reshape_warps(processed, raw_faces_coords, nose_r, cheeks_r, forehead_r, eye_e, lips_p)
             
             # Re-detect landmarks on warped image to ensure exact filter overlays
             warped_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
@@ -97,14 +117,19 @@ class BeautyFilterEngine:
                 color_look = params.get('color_look', 'None')
                 if color_look != 'None':
                     processed = self.apply_color_filter(processed, color_look, params.get('look_intensity', 1.0))
+                # Sync raw tracking history only before return
+                self.face_history_raw = self.new_history_raw
+                self.face_history_warped = {}
                 return processed
-        
-        # Apply filters for each detected face
+                
+        # Smooth warped landmarks coordinates
+        warped_faces_coords = []
         for face_landmarks in results.face_landmarks:
-            h, w = processed.shape[:2]
-            # Convert normalized landmarks to pixel coordinates
-            coords = np.array([(int(l.x * w), int(l.y * h)) for l in face_landmarks])
+            coords = self.get_smoothed_coords(face_landmarks, w, h, channel='warped')
+            warped_faces_coords.append(coords)
             
+        # Apply filters for each detected face using smoothed coordinates
+        for coords in warped_faces_coords:
             # 2. Generate skin mask (covers entire skin including nose)
             skin_mask = self.get_skin_mask(processed, coords)
             
@@ -112,9 +137,10 @@ class BeautyFilterEngine:
             if params.get('skin_brightening', 0.0) > 0.001:
                 processed = self.apply_skin_brightening(processed, skin_mask, params['skin_brightening'])
             
-            # 4. Apply skin smoothing
+            # 4. Apply skin smoothing (with high-pass texture recovery)
             if params.get('skin_smoothing', 0.0) > 0.001:
-                processed = self.apply_skin_smoothing(processed, skin_mask, params['skin_smoothing'])
+                texture_rec = params.get('skin_texture_recovery', 0.0)
+                processed = self.apply_skin_smoothing(processed, skin_mask, params['skin_smoothing'], texture_rec)
                 
             # 5. Apply blush / warmth to cheeks
             if params.get('blush_warmth', 0.0) > 0.001:
@@ -122,7 +148,7 @@ class BeautyFilterEngine:
                 
             # 6. Apply under-eye lighten
             if params.get('undereye_lighten', 0.0) > 0.001:
-                processed = self.apply_undereye_lighten(processed, coords, face_landmarks, params['undereye_lighten'])
+                processed = self.apply_undereye_lighten(processed, coords, None, params['undereye_lighten'])
                 
             # 7. Apply eye enhancement (contrast & clarity)
             if params.get('eye_enhancement', 0.0) > 0.001:
@@ -144,8 +170,60 @@ class BeautyFilterEngine:
         color_look = params.get('color_look', 'None')
         if color_look != 'None':
             processed = self.apply_color_filter(processed, color_look, params.get('look_intensity', 1.0))
+            
+        # Update history tracking logs
+        self.face_history_raw = self.new_history_raw
+        self.face_history_warped = self.new_history_warped
                 
         return processed
+
+    def get_smoothed_coords(self, face_landmarks, w, h, channel='raw'):
+        """
+        Track and smooth face landmarks over time using centroid-matching and
+        an Exponential Moving Average (EMA) to eliminate frame-to-frame wiggles.
+        """
+        # Convert landmarks to pixel coordinates
+        coords = np.array([(float(l.x * w), float(l.y * h)) for l in face_landmarks], dtype=np.float32)
+        centroid = np.mean(coords, axis=0)
+        
+        # Calculate face scale
+        face_width = np.linalg.norm(coords[234] - coords[454])
+        if face_width < 10.0:
+            face_width = 10.0
+            
+        # Pick trackers mapping based on channel
+        history = self.face_history_raw if channel == 'raw' else self.face_history_warped
+        new_history = self.new_history_raw if channel == 'raw' else self.new_history_warped
+        
+        # Match current face to historical track based on centroid distance
+        match_id = None
+        min_dist = float('inf')
+        threshold = face_width * 0.18  # Reset tracking if moved past 18% of face scale
+        
+        for face_id, (hist_centroid, hist_coords) in history.items():
+            dist = np.linalg.norm(centroid - hist_centroid)
+            if dist < min_dist and dist < threshold:
+                min_dist = dist
+                match_id = face_id
+                
+        # EMA weight (0.55 current frame, 0.45 history) balances response vs stability
+        alpha = 0.55
+        
+        if match_id is not None:
+            prev_coords = history[match_id][1]
+            smoothed_coords = alpha * coords + (1.0 - alpha) * prev_coords
+            smoothed_centroid = np.mean(smoothed_coords, axis=0)
+            new_history[match_id] = (smoothed_centroid, smoothed_coords)
+            return smoothed_coords.astype(np.int32)
+        else:
+            # Assign new track ID
+            next_id = self.next_id_raw if channel == 'raw' else self.next_id_warped
+            if channel == 'raw':
+                self.next_id_raw += 1
+            else:
+                self.next_id_warped += 1
+            new_history[next_id] = (centroid, coords)
+            return coords.astype(np.int32)
 
     def get_skin_mask(self, image, coords):
         h, w = image.shape[:2]
@@ -191,7 +269,7 @@ class BeautyFilterEngine:
         
         return feathered_mask
 
-    def apply_skin_smoothing(self, image, skin_mask, strength):
+    def apply_skin_smoothing(self, image, skin_mask, strength, texture_recovery=0.0):
         d = int(5 + 10 * strength)
         sigma_color = int(10 + 110 * strength)
         sigma_space = int(10 + 110 * strength)
@@ -201,7 +279,18 @@ class BeautyFilterEngine:
         mask_3d = np.expand_dims(skin_mask, axis=2)
         blend_factor = mask_3d * strength * 0.92
         
-        output = (image * (1.0 - blend_factor) + smoothed * blend_factor).astype(np.uint8)
+        smoothed_output = (image * (1.0 - blend_factor) + smoothed * blend_factor)
+        
+        # High-pass texture extraction & recovery
+        if texture_recovery > 0.001:
+            blurred = cv2.GaussianBlur(image, (3, 3), 0)
+            detail = image.astype(np.float32) - blurred.astype(np.float32)
+            reinjected_detail = detail * blend_factor * texture_recovery
+            final_output = smoothed_output.astype(np.float32) + reinjected_detail
+            output = np.clip(final_output, 0, 255).astype(np.uint8)
+        else:
+            output = smoothed_output.astype(np.uint8)
+            
         return output
 
     def apply_skin_brightening(self, image, skin_mask, strength):
@@ -386,7 +475,7 @@ class BeautyFilterEngine:
     # ==========================================
     # FACE RESHAPING WARP ENGINE (Snapchat-style)
     # ==========================================
-    def apply_reshape_warps(self, image, faces_landmarks, nose_reduce, cheeks_reduce, forehead_reduce, eye_enlarge=0.0, lips_plump=0.0):
+    def apply_reshape_warps(self, image, faces_coords, nose_reduce, cheeks_reduce, forehead_reduce, eye_enlarge=0.0, lips_plump=0.0):
         """
         Applies plastic warps on the coordinate space of the image using cv2.remap.
         Optimized by combining all deformations into a single interpolation pass.
@@ -401,9 +490,7 @@ class BeautyFilterEngine:
         # Track if anything is modified to avoid remapping if not needed
         is_warped = False
         
-        for face_landmarks in faces_landmarks:
-            coords = np.array([(int(l.x * w), int(l.y * h)) for l in face_landmarks])
-            
+        for coords in faces_coords:
             # Scale reference sizes based on face dimensions
             face_width = np.linalg.norm(coords[234] - coords[454])
             if face_width < 10:
