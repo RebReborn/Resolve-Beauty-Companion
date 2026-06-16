@@ -247,6 +247,39 @@ class MainWindow(QMainWindow):
         
         sidebar_layout.addWidget(sliders_group)
         
+        # --- Group 2.2: Body & Neck Retouching ---
+        body_group = QGroupBox("Body & Neck Skin Retouching")
+        body_layout = QVBoxLayout(body_group)
+        body_layout.setSpacing(10)
+        
+        self.body_retouching_checkbox = QCheckBox("Enable Body & Neck Retouching")
+        self.body_retouching_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #e0e0e0;
+                font-size: 11px;
+                margin-top: 5px;
+                margin-bottom: 5px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                background-color: #1a1a1a;
+                border: 1px solid #3d3d3d;
+                border-radius: 3px;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #ff9f1c;
+            }
+        """)
+        self.body_retouching_checkbox.stateChanged.connect(self._on_slider_changed)
+        body_layout.addWidget(self.body_retouching_checkbox)
+        
+        self.slider_body_sensitivity = PrecisionSlider("Body Skin Sensitivity", default_val=50)
+        self.slider_body_sensitivity.valueChanged.connect(self._on_slider_changed)
+        body_layout.addWidget(self.slider_body_sensitivity)
+        
+        sidebar_layout.addWidget(body_group)
+        
         # --- Group 2.5: Face Reshaping Controls ---
         reshaping_group = QGroupBox("Face Reshaping (Snapchat-style)")
         reshaping_layout = QVBoxLayout(reshaping_group)
@@ -589,7 +622,9 @@ class MainWindow(QMainWindow):
             "eyeshadow_strength": self.slider_eyeshadow_strength.value(),
             "lip_gloss_strength": self.slider_lip_gloss_strength.value(),
             "facial_highlighter_strength": self.slider_facial_highlighter_strength.value(),
-            "gpu_acceleration": self.gpu_checkbox.isChecked()
+            "gpu_acceleration": self.gpu_checkbox.isChecked(),
+            "enable_body_retouching": self.body_retouching_checkbox.isChecked(),
+            "body_sensitivity": 0.5 + 2.0 * (self.slider_body_sensitivity.value() / 100.0)
         }
         
     def update_sliders_ui(self, params):
@@ -617,6 +652,8 @@ class MainWindow(QMainWindow):
         self.slider_lip_gloss_strength.blockSignals(True)
         self.slider_facial_highlighter_strength.blockSignals(True)
         self.gpu_checkbox.blockSignals(True)
+        self.body_retouching_checkbox.blockSignals(True)
+        self.slider_body_sensitivity.blockSignals(True)
         
         self.slider_smoothing.setValue(params.get("skin_smoothing", 0.0))
         self.slider_texture_recovery.setValue(params.get("skin_texture_recovery", 0.0))
@@ -642,6 +679,10 @@ class MainWindow(QMainWindow):
         self.slider_lip_gloss_strength.setValue(params.get("lip_gloss_strength", 0.0))
         self.slider_facial_highlighter_strength.setValue(params.get("facial_highlighter_strength", 0.0))
         self.gpu_checkbox.setChecked(params.get("gpu_acceleration", False))
+        self.body_retouching_checkbox.setChecked(params.get("enable_body_retouching", False))
+        # sensitivity default is 1.5, which maps to 50 on the slider
+        sens_val = int((params.get("body_sensitivity", 1.5) - 0.5) / 2.0 * 100.0)
+        self.slider_body_sensitivity.setValue(sens_val)
         
         self.slider_smoothing.blockSignals(False)
         self.slider_texture_recovery.blockSignals(False)
@@ -666,6 +707,8 @@ class MainWindow(QMainWindow):
         self.slider_lip_gloss_strength.blockSignals(False)
         self.slider_facial_highlighter_strength.blockSignals(False)
         self.gpu_checkbox.blockSignals(False)
+        self.body_retouching_checkbox.blockSignals(False)
+        self.slider_body_sensitivity.blockSignals(False)
         
         # Redraw screen
         self._update_preview()
@@ -1500,6 +1543,14 @@ class InstructionManualDialog(QDialog):
             <li>Check <b>Enable GPU Acceleration (DirectML ONNX)</b> in the export panel.</li>
             <li>This offloads face mesh landmark estimation from the CPU to the GPU using Microsoft DirectML, compatible with AMD, Intel, and NVIDIA graphics processors.</li>
             <li>A seamless automatic fallback to standard MediaPipe CPU is built-in if no compatible DirectX 12 graphics processor is detected or if initialization fails.</li>
+        </ul>
+
+        <h2>7. Body & Neck Skin Retouching</h2>
+        <p>Apply skin smoothing and skin brightening to the neck and upper body chest regions:</p>
+        <ul>
+            <li>Check <b>Enable Body & Neck Retouching</b> in the sidebar.</li>
+            <li>This dynamically samples skin color tones from the tracked face oval and runs an adaptive YCrCb color segmentation on a cropped region of interest (ROI) extending below the chin.</li>
+            <li>Adjust <b>Body Skin Sensitivity</b> to adapt the skin-color matching range. Higher values expand the matching threshold (useful for varied lighting), while lower values prevent color bleed onto background elements.</li>
         </ul>
         </body>
         </html>

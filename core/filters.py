@@ -186,7 +186,7 @@ class BeautyFilterEngine:
         # Apply filters for each detected face using smoothed coordinates
         for coords in warped_faces_coords:
             # 2. Generate skin mask (covers entire skin including nose)
-            skin_mask = self.get_skin_mask(processed, coords)
+            skin_mask = self.get_skin_mask(processed, coords, params)
             
             # 3. Apply skin brightening
             if params.get('skin_brightening', 0.0) > 0.001:
@@ -318,7 +318,7 @@ class BeautyFilterEngine:
             new_history[next_id] = (centroid, coords)
             return coords.astype(np.int32)
 
-    def get_skin_mask(self, image, coords):
+    def get_skin_mask(self, image, coords, params=None):
         h, w = image.shape[:2]
         
         # 1. Face Oval Mask
@@ -343,7 +343,75 @@ class BeautyFilterEngine:
         fill_features(LIPS_INDICES)
         
         # Landmarked face area minus features
-        final_skin_mask = cv2.bitwise_and(face_mask, cv2.bitwise_not(exclude_mask))
+        face_skin_mask = cv2.bitwise_and(face_mask, cv2.bitwise_not(exclude_mask))
+        final_skin_mask = face_skin_mask.copy()
+        
+        # 3. Apply adaptive body & neck skin segmentation if enabled
+        if params and params.get("enable_body_retouching", False):
+            body_sensitivity = params.get("body_sensitivity", 1.5)
+            
+            face_min_y = np.min(coords[:, 1])
+            face_max_y = np.max(coords[:, 1])
+            face_min_x = np.min(coords[:, 0])
+            face_max_x = np.max(coords[:, 0])
+            
+            face_h = face_max_y - face_min_y
+            face_w = face_max_x - face_min_x
+            
+            # ROI Box: starts slightly above chin, goes to bottom of frame, extends horizontally to shoulders
+            roi_top = int(face_max_y - face_h * 0.15)
+            roi_bottom = h
+            roi_left = max(0, int(face_min_x - face_w * 0.7))
+            roi_right = min(w, int(face_max_x + face_w * 0.7))
+            
+            if roi_right > roi_left and roi_bottom > roi_top:
+                # Crop face region for color sampling to avoid full-frame conversion
+                face_crop_y1 = max(0, int(face_min_y))
+                face_crop_y2 = min(h, int(face_max_y))
+                face_crop_x1 = max(0, int(face_min_x))
+                face_crop_x2 = min(w, int(face_max_x))
+                
+                if (face_crop_y2 > face_crop_y1) and (face_crop_x2 > face_crop_x1):
+                    face_crop = image[face_crop_y1:face_crop_y2, face_crop_x1:face_crop_x2]
+                    face_mask_crop = face_skin_mask[face_crop_y1:face_crop_y2, face_crop_x1:face_crop_x2]
+                    
+                    ycrcb_face = cv2.cvtColor(face_crop, cv2.COLOR_BGR2YCrCb)
+                    skin_pixels = ycrcb_face[face_mask_crop > 0]
+                    
+                    if len(skin_pixels) > 100:
+                        # Calculate mean and standard deviation of chrominance color channels (Cr, Cb)
+                        cr_mean = np.mean(skin_pixels[:, 1])
+                        cb_mean = np.mean(skin_pixels[:, 2])
+                        cr_std = np.std(skin_pixels[:, 1])
+                        cb_std = np.std(skin_pixels[:, 2])
+                        
+                        # Dynamic thresholds scale based on sensitivity (std multiplier)
+                        std_mult = 1.3 * body_sensitivity
+                        cr_tol = max(6.0, cr_std * std_mult)
+                        cb_tol = max(6.0, cb_std * std_mult)
+                        
+                        # Adaptive lower and upper color limits
+                        lower_skin = np.array([0, max(0, int(cr_mean - cr_tol)), max(0, int(cb_mean - cb_tol))], dtype=np.uint8)
+                        upper_skin = np.array([255, min(255, int(cr_mean + cr_tol)), min(255, int(cb_mean + cb_tol))], dtype=np.uint8)
+                        
+                        # Crop body ROI region
+                        roi_crop = image[roi_top:roi_bottom, roi_left:roi_right]
+                        ycrcb_roi = cv2.cvtColor(roi_crop, cv2.COLOR_BGR2YCrCb)
+                        
+                        # Perform skin color thresholding only on the ROI cropped region
+                        color_mask_roi = cv2.inRange(ycrcb_roi, lower_skin, upper_skin)
+                        
+                        # Morphological filtering on the ROI cropped region (very fast)
+                        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                        body_skin_roi = cv2.morphologyEx(color_mask_roi, cv2.MORPH_OPEN, kernel)
+                        body_skin_roi = cv2.morphologyEx(body_skin_roi, cv2.MORPH_CLOSE, kernel)
+                        
+                        # Map cropped ROI mask back to original frame size
+                        body_skin = np.zeros((h, w), dtype=np.uint8)
+                        body_skin[roi_top:roi_bottom, roi_left:roi_right] = body_skin_roi
+                        
+                        # Combine face skin mask and body skin mask
+                        final_skin_mask = cv2.bitwise_or(final_skin_mask, body_skin)
         
         # Soften and feather the skin mask to prevent hard edges
         feather_size = int(max(w, h) * 0.012) | 1

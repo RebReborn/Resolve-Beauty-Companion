@@ -166,7 +166,9 @@ def load_preset_from_file(filepath):
             "eyeshadow_shade": "None",
             "eyeshadow_strength": 0.0,
             "lip_gloss_strength": 0.0,
-            "facial_highlighter_strength": 0.0
+            "facial_highlighter_strength": 0.0,
+            "enable_body_retouching": False,
+            "body_sensitivity": 1.5
         }
         for key, default in required_keys.items():
             if key not in params:
