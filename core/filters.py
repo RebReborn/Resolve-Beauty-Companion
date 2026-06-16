@@ -5,6 +5,54 @@ from mediapipe.tasks.python import vision
 import numpy as np
 import os
 import urllib.request
+import time
+
+class VectorizedOneEuroFilter:
+    """
+    Vectorized One Euro Filter for smoothing arrays of coordinates in real time.
+    Calculates dynamic cutoff frequencies based on speed to prevent lag
+    during fast motion while eliminating wiggling jitter at low speeds.
+    """
+    def __init__(self, min_cutoff=0.8, beta=0.01, d_cutoff=1.0):
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self.d_cutoff = d_cutoff
+        self.x_prev = None
+        self.dx_prev = None
+        self.t_prev = None
+
+    def filter(self, t, x):
+        x = np.array(x, dtype=np.float32)
+        if self.x_prev is None:
+            self.x_prev = x.copy()
+            self.dx_prev = np.zeros_like(x)
+            self.t_prev = t
+            return self.x_prev
+
+        dt = t - self.t_prev
+        if dt <= 0.0001:
+            return self.x_prev
+
+        # Compute derivative (velocity)
+        dx = (x - self.x_prev) / dt
+        
+        # Filter derivative (velocity) using low-pass filter
+        alpha_d = 1.0 / (1.0 + self.d_cutoff / (2.0 * np.pi * dt))
+        dx_hat = alpha_d * dx + (1.0 - alpha_d) * self.dx_prev
+        
+        # Compute dynamic cutoff frequency based on velocity magnitude
+        speed = np.linalg.norm(dx_hat, axis=-1, keepdims=True)
+        cutoff = self.min_cutoff + self.beta * speed
+        
+        # Filter signal
+        alpha = 1.0 / (1.0 + cutoff / (2.0 * np.pi * dt))
+        x_hat = alpha * x + (1.0 - alpha) * self.x_prev
+        
+        self.x_prev = x_hat
+        self.dx_prev = dx_hat
+        self.t_prev = t
+        return x_hat
+
 
 # Static lists of MediaPipe Face Mesh landmark indices
 LEFT_EYE_INDICES = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
@@ -45,6 +93,11 @@ class BeautyFilterEngine:
         self.face_history_warped = {}
         self.next_id_raw = 0
         self.next_id_warped = 0
+        
+        # One Euro Filter state & Optical Flow history state
+        self.one_euro_trackers = {}
+        self.prev_gray = None
+        self.optical_flow_frames = 0
 
     def process_frame(self, image, params, preview_width=None):
         """
@@ -83,11 +136,16 @@ class BeautyFilterEngine:
         self.new_history_raw = {}
         self.new_history_warped = {}
         
+        # Convert to grayscale for optical flow tracking
+        current_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
         # Check if GPU acceleration is enabled and set up ONNX detector if needed
         use_gpu = params.get('gpu_acceleration', False)
         onnx_success = False
         raw_faces_landmarks = None
+        optical_flow_success = False
         
+        # 1. Run standard neural network/MediaPipe detection first
         if use_gpu:
             if self.onnx_detector is None:
                 try:
@@ -114,10 +172,44 @@ class BeautyFilterEngine:
             results = self.landmarker.detect(mp_image)
             raw_faces_landmarks = results.face_landmarks if results else []
 
+        # 2. If standard detection fails, fall back to Lucas-Kanade Optical Flow (max 6 consecutive frames)
+        if not raw_faces_landmarks and self.prev_gray is not None and self.face_history_raw and self.optical_flow_frames <= 6:
+            tracked_faces = []
+            tracking_failed = False
+            
+            lk_params = dict(
+                winSize=(21, 21),
+                maxLevel=3,
+                criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
+            )
+            
+            for face_id, (prev_centroid, prev_coords) in self.face_history_raw.items():
+                pts_prev = np.array(prev_coords, dtype=np.float32).reshape(-1, 1, 2)
+                pts_next, status, err = cv2.calcOpticalFlowPyrLK(
+                    self.prev_gray, current_gray, pts_prev, None, **lk_params
+                )
+                
+                tracked_ratio = np.mean(status == 1)
+                if tracked_ratio > 0.75:
+                    coords_next = pts_next.reshape(-1, 2)
+                    tracked_faces.append(coords_next)
+                else:
+                    tracking_failed = True
+                    break
+            
+            if not tracking_failed and tracked_faces:
+                raw_faces_landmarks = tracked_faces
+                optical_flow_success = True
+                self.optical_flow_frames += 1
+                
+        if not optical_flow_success:
+            self.optical_flow_frames = 0
+
         if not raw_faces_landmarks:
             if export_alpha:
                 self.face_history_raw = {}
                 self.face_history_warped = {}
+                self.prev_gray = current_gray
                 return np.zeros((h, w, 4), dtype=np.uint8)
             # Still apply color looks if no face is detected
             color_look = params.get('color_look', 'None')
@@ -126,6 +218,7 @@ class BeautyFilterEngine:
             # Clean up history if tracking is completely lost
             self.face_history_raw = {}
             self.face_history_warped = {}
+            self.prev_gray = current_gray
             return processed
             
         # Smooth raw landmarks coordinates
@@ -147,24 +240,29 @@ class BeautyFilterEngine:
             
             # Re-detect landmarks on warped image to ensure exact filter overlays
             warped_faces_landmarks = None
-            if onnx_success and self.onnx_detector is not None:
-                try:
-                    warped_landmarks = self.onnx_detector.detect(processed)
-                    if warped_landmarks:
-                        warped_faces_landmarks = warped_landmarks
-                except Exception as e:
-                    print(f"ONNX detection on warped image failed: {e}. Falling back to MediaPipe CPU.")
-            
-            if warped_faces_landmarks is None:
-                warped_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
-                warped_mp = mp.Image(image_format=mp.ImageFormat.SRGB, data=warped_rgb)
-                results = self.landmarker.detect(warped_mp)
-                warped_faces_landmarks = results.face_landmarks if results else []
+            if optical_flow_success:
+                # Skip re-detection when in optical flow fallback (saves processing time and prevents flicker)
+                warped_faces_landmarks = raw_faces_coords
+            else:
+                if onnx_success and self.onnx_detector is not None:
+                    try:
+                        warped_landmarks = self.onnx_detector.detect(processed)
+                        if warped_landmarks:
+                            warped_faces_landmarks = warped_landmarks
+                    except Exception as e:
+                        print(f"ONNX detection on warped image failed: {e}. Falling back to MediaPipe CPU.")
+                
+                if warped_faces_landmarks is None:
+                    warped_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
+                    warped_mp = mp.Image(image_format=mp.ImageFormat.SRGB, data=warped_rgb)
+                    results = self.landmarker.detect(warped_mp)
+                    warped_faces_landmarks = results.face_landmarks if results else []
                 
             if not warped_faces_landmarks:
                 if export_alpha:
                     self.face_history_raw = self.new_history_raw
                     self.face_history_warped = {}
+                    self.prev_gray = current_gray
                     return np.zeros((h, w, 4), dtype=np.uint8)
                 # Fallback: color look and return
                 color_look = params.get('color_look', 'None')
@@ -173,6 +271,7 @@ class BeautyFilterEngine:
                 # Sync raw tracking history only before return
                 self.face_history_raw = self.new_history_raw
                 self.face_history_warped = {}
+                self.prev_gray = current_gray
                 return processed
         else:
             warped_faces_landmarks = raw_faces_landmarks
@@ -254,6 +353,7 @@ class BeautyFilterEngine:
             # Update history tracking logs
             self.face_history_raw = self.new_history_raw
             self.face_history_warped = self.new_history_warped
+            self.prev_gray = current_gray
             return bgra
 
         # 8. Apply color looks
@@ -264,13 +364,14 @@ class BeautyFilterEngine:
         # Update history tracking logs
         self.face_history_raw = self.new_history_raw
         self.face_history_warped = self.new_history_warped
+        self.prev_gray = current_gray
                 
         return processed
 
     def get_smoothed_coords(self, face_landmarks, w, h, channel='raw'):
         """
         Track and smooth face landmarks over time using centroid-matching and
-        an Exponential Moving Average (EMA) to eliminate frame-to-frame wiggles.
+        a vectorized One Euro Filter to eliminate wiggles and prevent lag in motion.
         """
         # Convert landmarks to pixel coordinates
         if isinstance(face_landmarks, np.ndarray):
@@ -299,12 +400,14 @@ class BeautyFilterEngine:
                 min_dist = dist
                 match_id = face_id
                 
-        # EMA weight (0.55 current frame, 0.45 history) balances response vs stability
-        alpha = 0.55
+        t = time.perf_counter()
         
         if match_id is not None:
-            prev_coords = history[match_id][1]
-            smoothed_coords = alpha * coords + (1.0 - alpha) * prev_coords
+            tracker_key = f"{channel}_{match_id}"
+            if tracker_key not in self.one_euro_trackers:
+                self.one_euro_trackers[tracker_key] = VectorizedOneEuroFilter()
+                
+            smoothed_coords = self.one_euro_trackers[tracker_key].filter(t, coords)
             smoothed_centroid = np.mean(smoothed_coords, axis=0)
             new_history[match_id] = (smoothed_centroid, smoothed_coords)
             return smoothed_coords.astype(np.int32)
@@ -315,8 +418,13 @@ class BeautyFilterEngine:
                 self.next_id_raw += 1
             else:
                 self.next_id_warped += 1
-            new_history[next_id] = (centroid, coords)
-            return coords.astype(np.int32)
+                
+            tracker_key = f"{channel}_{next_id}"
+            self.one_euro_trackers[tracker_key] = VectorizedOneEuroFilter()
+            smoothed_coords = self.one_euro_trackers[tracker_key].filter(t, coords)
+            
+            new_history[next_id] = (centroid, smoothed_coords)
+            return smoothed_coords.astype(np.int32)
 
     def get_skin_mask(self, image, coords, params=None):
         h, w = image.shape[:2]
