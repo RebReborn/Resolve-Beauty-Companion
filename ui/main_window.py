@@ -1111,6 +1111,11 @@ class MainWindow(QMainWindow):
         # 3. Help Menu
         help_menu = menubar.addMenu("Help")
         
+        manual_action = QAction("Instruction Manual...", self)
+        manual_action.setShortcut("F1")
+        manual_action.triggered.connect(self._on_manual_triggered)
+        help_menu.addAction(manual_action)
+        
         shortcuts_action = QAction("Shortcuts Reference...", self)
         shortcuts_action.triggered.connect(self._on_shortcuts_triggered)
         help_menu.addAction(shortcuts_action)
@@ -1163,6 +1168,7 @@ class MainWindow(QMainWindow):
     def _on_shortcuts_triggered(self):
         QMessageBox.information(
             self, "Keyboard Shortcuts Reference",
+            "<b>F1</b>: Open the User Instruction Manual<br>"
             "<b>Spacebar</b>: Toggle play/pause video preview (or freeze/resume webcam)<br>"
             "<b>Enter / Return</b>: Trigger video export processing<br>"
             "<b>Ctrl + O</b>: Open video file<br>"
@@ -1170,3 +1176,188 @@ class MainWindow(QMainWindow):
             "<b>Ctrl + L</b>: Load preset file<br>"
             "<b>Ctrl + Q</b>: Quit the application"
         )
+
+    def _on_manual_triggered(self):
+        dialog = InstructionManualDialog(self)
+        dialog.exec()
+
+from PyQt6.QtWidgets import QDialog, QTextBrowser
+
+class InstructionManualDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Resolve Beauty Companion - Instruction Manual")
+        self.setMinimumSize(800, 650)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #121212;
+            }
+            QPushButton {
+                background-color: #ff9f1c;
+                color: #121212;
+                font-weight: bold;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #ffa834;
+            }
+            QPushButton:pressed {
+                background-color: #e68e14;
+            }
+            QTextBrowser {
+                background-color: #1a1a1a;
+                color: #e0e0e0;
+                border: 1px solid #2d2d2d;
+                border-radius: 6px;
+                padding: 15px;
+            }
+        """)
+        
+        layout = QVBoxLayout(self)
+        
+        # HTML instruction browser
+        self.browser = QTextBrowser()
+        self.browser.setOpenExternalLinks(True)
+        self.browser.setHtml(self.get_manual_html())
+        layout.addWidget(self.browser)
+        
+        # Bottom controls
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        close_btn = QPushButton("Close Manual")
+        close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+        
+    def get_manual_html(self):
+        return """
+        <html>
+        <head>
+        <style>
+            body {
+                font-family: 'Segoe UI', Arial, sans-serif;
+                color: #e0e0e0;
+                background-color: #1a1a1a;
+                margin: 0;
+                padding: 0;
+            }
+            h1 {
+                color: #ff9f1c;
+                border-bottom: 2px solid #ff9f1c;
+                padding-bottom: 10px;
+                font-size: 22px;
+                margin-top: 0;
+            }
+            h2 {
+                color: #ff9f1c;
+                border-bottom: 1px solid #2d2d2d;
+                padding-bottom: 5px;
+                font-size: 16px;
+                margin-top: 20px;
+            }
+            h3 {
+                color: #ffa834;
+                font-size: 13px;
+                margin-top: 15px;
+                margin-bottom: 5px;
+            }
+            p, li {
+                font-size: 12px;
+                line-height: 1.6;
+            }
+            code {
+                font-family: Consolas, monospace;
+                background-color: #2b2b2b;
+                color: #ff9f1c;
+                padding: 2px 5px;
+                border-radius: 3px;
+                font-size: 11px;
+            }
+            ul, ol {
+                margin-top: 5px;
+                margin-bottom: 15px;
+                padding-left: 20px;
+            }
+            .accent {
+                color: #ff9f1c;
+                font-weight: bold;
+            }
+            .tip-box {
+                background-color: #24211a;
+                border-left: 4px solid #ff9f1c;
+                padding: 10px 15px;
+                margin: 15px 0;
+                border-radius: 0 4px 4px 0;
+                font-size: 12px;
+            }
+        </style>
+        </head>
+        <body>
+        <h1>Resolve Beauty Companion - User Manual</h1>
+
+        <p>Welcome to the <b>Resolve Beauty Companion</b> user manual. This application acts as a real-time facial retouching, beauty filtering, and face reshaping companion to <b>DaVinci Resolve</b>.</p>
+
+        <div class="tip-box">
+            <b>Quick Start:</b> If DaVinci Resolve is active, press the <b>Sync Clip from Resolve</b> button under <i>Source Selection</i> in the sidebar to auto-load the current timeline clip.
+        </div>
+
+        <h2>1. Adjustment Sliders Guide</h2>
+        <p>These features apply skin-smoothing and lighting enhancements to the face:</p>
+        <ul>
+            <li><b>Skin Smoothing:</b> Utilizes bilateral filtering to smooth skin blemishes, pores, and tone, while ignoring contours like eyes, nostrils, eyebrows, and lips.</li>
+            <li><b>Skin Texture Recovery:</b> Extracts and blends original skin pore details back onto smoothed regions to maintain organic realism and prevent artificial blur.</li>
+            <li><b>Skin Brightening:</b> Increases lighting luminance on skin zones for a radiant glow.</li>
+            <li><b>Blush / Warmth:</b> Automatically places warmth and red tones on the cheeks.</li>
+            <li><b>Under-eye Lighten:</b> Brightens shadow details directly under the eyes, minimizing dark circles.</li>
+            <li><b>Eye Enhancement:</b> Sharpens details and adjusts local contrast inside the eye shape for brighter, more vivid eyes.</li>
+        </ul>
+
+        <h2>2. Face Reshaping & Cosmetic Makeup</h2>
+        <p>These settings warp facial dimensions and apply overlays:</p>
+        <ul>
+            <li><b>Nose Size Reduce:</b> Horizontal pinch warp that slims the tip and width of the nose.</li>
+            <li><b>Cheek Slimming:</b> Dual jawline pinch warps that slim the lower cheek contours.</li>
+            <li><b>Forehead Reduce:</b> Shrugs the hairline vertically downwards.</li>
+            <li><b>Eye Size (Enlarge):</b> Bulge warps centered on left/right irises to enlarge the eyes.</li>
+            <li><b>Lip Size (Plump):</b> Bulge warp centered on mouth coordinates to plump the lips.</li>
+            <li><b>Lipstick Shade & Strength:</b> Color makeup overlay on the lip contour (Rose Red, Soft Pink, Peach Glow, Plum Berry).</li>
+            <li><b>Eye Color Shade & Strength:</b> Colored contact lens overlay on the iris boundaries (Ocean Blue, Emerald Green, Honey Brown, Deep Amber).</li>
+        </ul>
+
+        <h2>3. Cinematic Looks & 3D LUT Export</h2>
+        <p>Export look presets directly into Resolve color nodes:</p>
+        <ul>
+            <li><b>Save Look as LUT:</b> Select <span class="accent">File > Export Look as 3D LUT (.cube)...</span> to output a standard 33x33x33 3D LUT file.</li>
+            <li><b>Load into DaVinci Resolve:</b>
+                <ol>
+                    <li>In DaVinci Resolve, go to <b>Project Settings > Color Management</b>.</li>
+                    <li>Click <b>Open LUT Folder</b> under Lookup Tables.</li>
+                    <li>Paste your exported <code>.cube</code> file inside.</li>
+                    <li>Click <b>Update Lists</b>. The LUT can now be applied to any grading node.</li>
+                </ol>
+            </li>
+        </ul>
+
+        <h2>4. ProRes 4444 Alpha Overlay Export</h2>
+        <p>Export transparent overlays to layer beauty effects on top of Resolve clips:</p>
+        <ol>
+            <li>Configure skin smoothing and makeup adjustments.</li>
+            <li>Check <b>Export Alpha Overlay Only</b> (locks output codec to <b>ProRes (4444 Alpha)</b>).</li>
+            <li>Export the video. Drag the transparent <code>.mov</code> clip into DaVinci Resolve directly onto a track **above** your source graded clip.</li>
+        </ol>
+
+        <h2>5. Resolve Timeline Scripting Bridge</h2>
+        <p>Launch the companion app directly from Resolve's workspace:</p>
+        <ol>
+            <li>Copy the bridge script <code>ResolveBeautyBridge.py</code> from the app directory.</li>
+            <li>Paste it inside Resolve's scripting folder:
+                <br><code>C:\\Users\\REBORN PIX3LS\\AppData\\Roaming\\Blackmagic Design\\DaVinci Resolve\\Support\\Developer\\Scripting\\Utility\\</code>
+            </li>
+            <li>Restart Resolve and select: <b>Workspace > Scripts > ResolveBeautyBridge</b>.</li>
+        </ol>
+        </body>
+        </html>
+        """
