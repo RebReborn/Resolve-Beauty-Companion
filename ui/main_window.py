@@ -12,6 +12,8 @@ from ui.widgets import PrecisionSlider, BeforeAfterViewer
 from core.filters import BeautyFilterEngine
 from core.processor import VideoProcessorThread, WebcamThread, VideoReader, CODEC_MAP
 from utils.presets import DEFAULT_PRESETS, save_preset_to_file, load_preset_from_file
+from core.batch_manager import BatchQueueProcessor
+from ui.batch_dialog import BatchManagerDialog
 
 class MainWindow(QMainWindow):
     def __init__(self, clip_path=None):
@@ -33,6 +35,10 @@ class MainWindow(QMainWindow):
         self.current_frame_idx = 0
         self.is_playing = False
         self.active_frame = None  # Original BGR numpy array
+        
+        # Batch queue system
+        self.batch_processor = BatchQueueProcessor()
+        self.batch_dialog = BatchManagerDialog(self.batch_processor, self, self)
         
         self.init_ui()
         self.apply_theme()
@@ -344,6 +350,18 @@ class MainWindow(QMainWindow):
         self.export_btn.clicked.connect(self._on_export_video)
         self.export_btn.setEnabled(False)
         export_layout.addWidget(self.export_btn)
+        
+        batch_btn_layout = QHBoxLayout()
+        self.add_to_batch_btn = QPushButton("Add to Batch Queue")
+        self.add_to_batch_btn.setEnabled(False)
+        self.add_to_batch_btn.clicked.connect(self._on_add_to_batch_queue)
+        
+        self.show_queue_btn = QPushButton("Show Queue Manager")
+        self.show_queue_btn.clicked.connect(self._on_show_batch_dialog)
+        
+        batch_btn_layout.addWidget(self.add_to_batch_btn)
+        batch_btn_layout.addWidget(self.show_queue_btn)
+        export_layout.addLayout(batch_btn_layout)
         
         sidebar_layout.addWidget(export_group)
         sidebar_layout.addStretch()
@@ -716,6 +734,8 @@ class MainWindow(QMainWindow):
             self.is_playing = False
             
             self.export_btn.setEnabled(True)
+            self.add_to_batch_btn.setEnabled(True)
+            self.add_batch_action.setEnabled(True)
             
             # Update labels
             self.fps_label.setText(f"Source FPS: {self.video_reader.fps:.2f} | {self.video_reader.width}x{self.video_reader.height}")
@@ -797,6 +817,8 @@ class MainWindow(QMainWindow):
                 self.scrub_bar.setEnabled(True)
                 self.play_btn.setEnabled(True)
                 self.export_btn.setEnabled(True)
+                self.add_to_batch_btn.setEnabled(True)
+                self.add_batch_action.setEnabled(True)
                 self.active_frame = self.video_reader.read_frame(self.current_frame_idx)
                 self._update_preview()
             self.statusBar().showMessage("Webcam preview stopped")
@@ -814,6 +836,8 @@ class MainWindow(QMainWindow):
             self.scrub_bar.setEnabled(False)
             self.play_btn.setEnabled(False)
             self.export_btn.setEnabled(False)
+            self.add_to_batch_btn.setEnabled(False)
+            self.add_batch_action.setEnabled(False)
             
             # Start Webcam worker thread
             self.webcam_thread = WebcamThread(self.filter_engine, self.get_slider_params)
@@ -990,6 +1014,9 @@ class MainWindow(QMainWindow):
         self.sync_resolve_btn.setEnabled(not active)
         self.webcam_btn.setEnabled(not active)
         self.export_btn.setEnabled(not active)
+        self.add_to_batch_btn.setEnabled(not active)
+        self.add_batch_action.setEnabled(not active)
+        self.show_queue_btn.setEnabled(not active)
         self.export_alpha_checkbox.setEnabled(not active)
         self.save_preset_btn.setEnabled(not active)
         self.load_preset_btn.setEnabled(not active)
@@ -1013,6 +1040,8 @@ class MainWindow(QMainWindow):
             self.export_thread.wait()
         if self.video_reader:
             self.video_reader.release()
+        if self.batch_processor:
+            self.batch_processor.pause_queue()
         event.accept()
 
     # ==========================================
@@ -1134,6 +1163,19 @@ class MainWindow(QMainWindow):
         
         file_menu.addSeparator()
         
+        add_batch_action = QAction("Add Current Clip to Queue...", self)
+        add_batch_action.setShortcut("Ctrl+B")
+        add_batch_action.triggered.connect(self._on_add_to_batch_queue)
+        file_menu.addAction(add_batch_action)
+        self.add_batch_action = add_batch_action
+        self.add_batch_action.setEnabled(False)
+        
+        show_batch_action = QAction("Open Batch Manager Dialog...", self)
+        show_batch_action.triggered.connect(self._on_show_batch_dialog)
+        file_menu.addAction(show_batch_action)
+        
+        file_menu.addSeparator()
+        
         exit_action = QAction("Exit", self)
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
@@ -1226,6 +1268,40 @@ class MainWindow(QMainWindow):
     def _on_manual_triggered(self):
         dialog = InstructionManualDialog(self)
         dialog.exec()
+
+    def _on_add_to_batch_queue(self):
+        if not self.video_reader:
+            return
+            
+        if self.is_playing:
+            self._on_toggle_play()
+            
+        default_name = "beauty_" + os.path.basename(self.video_reader.filepath)
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Export Queue Video As", default_name,
+            "Video Files (*.mov *.mp4)"
+        )
+        
+        if filepath:
+            codec = self.codec_combo.currentText()
+            params = self.get_slider_params()
+            preset_name = self.preset_combo.currentText() or "Custom"
+            
+            self.batch_processor.add_item(
+                input_path=self.video_reader.filepath,
+                output_path=filepath,
+                codec_name=codec,
+                params=params,
+                preset_name=preset_name
+            )
+            
+            self.statusBar().showMessage(f"Added clip to Batch Queue: {os.path.basename(filepath)}")
+            self._on_show_batch_dialog()
+
+    def _on_show_batch_dialog(self):
+        self.batch_dialog.show()
+        self.batch_dialog.raise_()
+        self.batch_dialog.activateWindow()
 
 from PyQt6.QtWidgets import QDialog, QTextBrowser
 
