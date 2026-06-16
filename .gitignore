@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.env
+
+# MediaPipe face landmarker binary weights
+core/face_landmarker.task
+
+# IDEs/Editors
+.idea/
+.vscode/
+
+# Local diagnostic/test scripts
+inspect_ui.py
+test_setup.py
+
+# Video and Media files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.mxf
+*.webm

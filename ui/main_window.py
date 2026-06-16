@@ -1,0 +1,1118 @@
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                             QPushButton, QComboBox, QFileDialog, QLabel, 
+                             QProgressBar, QGroupBox, QMessageBox, QSlider, QScrollArea)
+from PyQt6.QtCore import Qt, QTimer, QSize, QPointF
+from PyQt6.QtGui import QAction, QKeySequence, QIcon, QImage, QPainter, QPixmap, QColor, QPen, QBrush, QLinearGradient, QPolygonF
+import os
+import cv2
+import numpy as np
+
+from ui.widgets import PrecisionSlider, BeforeAfterViewer
+from core.filters import BeautyFilterEngine
+from core.processor import VideoProcessorThread, WebcamThread, VideoReader, CODEC_MAP
+from utils.presets import DEFAULT_PRESETS, save_preset_to_file, load_preset_from_file
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Resolve Beauty Companion")
+        self.setMinimumSize(QSize(1200, 800))
+        
+        # Core engines
+        self.filter_engine = BeautyFilterEngine()
+        self.video_reader = None
+        self.video_timer = QTimer(self)
+        self.video_timer.timeout.connect(self._on_play_step)
+        
+        # Active workers
+        self.webcam_thread = None
+        self.export_thread = None
+        
+        # State
+        self.current_frame_idx = 0
+        self.is_playing = False
+        self.active_frame = None  # Original BGR numpy array
+        
+        self.init_ui()
+        self.apply_theme()
+        self.load_default_presets()
+        self.setup_shortcuts()
+        self.create_app_icon()
+        self.setup_menu_bar()
+        
+    def init_ui(self):
+        # Main central widget
+        central_widget = QWidget(self)
+        self.setCentralWidget(central_widget)
+        
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(15)
+        
+        # ==========================================
+        # LEFT PANEL (Control Sidebar in Scroll Area)
+        # ==========================================
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFixedWidth(340)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: #121212;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: #1a1a1a;
+                width: 8px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #3d3d3d;
+                min-height: 20px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #ff9f1c;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
+        """)
+        
+        sidebar = QWidget()
+        sidebar.setStyleSheet("background-color: #121212;")
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(5, 5, 5, 5)
+        sidebar_layout.setSpacing(12)
+        
+        # --- Group 1: Presets ---
+        preset_group = QGroupBox("Filter Presets")
+        preset_layout = QVBoxLayout(preset_group)
+        
+        self.preset_combo = QComboBox()
+        self.preset_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #1a1a1a;
+                color: #e0e0e0;
+                border: 1px solid #3d3d3d;
+                border-radius: 4px;
+                padding: 6px;
+                font-weight: 500;
+            }
+            QComboBox::drop-down {
+                border: 0px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1a1a1a;
+                color: #e0e0e0;
+                selection-background-color: #ff9f1c;
+                selection-color: #121212;
+            }
+        """)
+        self.preset_combo.currentTextChanged.connect(self._on_preset_selected)
+        preset_layout.addWidget(self.preset_combo)
+        
+        preset_btn_layout = QHBoxLayout()
+        self.save_preset_btn = QPushButton("Save Preset")
+        self.save_preset_btn.clicked.connect(self._on_save_preset)
+        self.load_preset_btn = QPushButton("Load Preset File")
+        self.load_preset_btn.clicked.connect(self._on_load_preset)
+        
+        preset_btn_layout.addWidget(self.save_preset_btn)
+        preset_btn_layout.addWidget(self.load_preset_btn)
+        preset_layout.addLayout(preset_btn_layout)
+        sidebar_layout.addWidget(preset_group)
+        
+        # --- Group 1.5: Cinematic Looks ---
+        looks_group = QGroupBox("Cinematic Looks")
+        looks_layout = QVBoxLayout(looks_group)
+        
+        self.look_combo = QComboBox()
+        self.look_combo.addItems(["None", "Warm Sunset", "Cool Ice", "Vintage Sepia", "Teal & Orange", "Cinematic Mono"])
+        self.look_combo.setStyleSheet(self.preset_combo.styleSheet())
+        self.look_combo.currentTextChanged.connect(self._on_slider_changed)
+        
+        self.slider_look_intensity = PrecisionSlider("Look Intensity", default_val=100)
+        self.slider_look_intensity.valueChanged.connect(self._on_slider_changed)
+        
+        looks_layout.addWidget(self.look_combo)
+        looks_layout.addWidget(self.slider_look_intensity)
+        sidebar_layout.addWidget(looks_group)
+        
+        # --- Group 1.6: Makeup Color Overlays ---
+        makeup_group = QGroupBox("Makeup Color Overlays")
+        makeup_layout = QVBoxLayout(makeup_group)
+        makeup_layout.setSpacing(6)
+        
+        lipstick_label = QLabel("Lipstick Shade:")
+        lipstick_label.setStyleSheet("color: #a0a0a0; font-size: 11px;")
+        makeup_layout.addWidget(lipstick_label)
+        
+        self.lipstick_combo = QComboBox()
+        self.lipstick_combo.addItems(["None", "Rose Red", "Soft Pink", "Peach Glow", "Plum Berry"])
+        self.lipstick_combo.setStyleSheet(self.preset_combo.styleSheet())
+        self.lipstick_combo.currentTextChanged.connect(self._on_slider_changed)
+        makeup_layout.addWidget(self.lipstick_combo)
+        
+        self.slider_lipstick_strength = PrecisionSlider("Lipstick Strength")
+        self.slider_lipstick_strength.valueChanged.connect(self._on_slider_changed)
+        makeup_layout.addWidget(self.slider_lipstick_strength)
+        
+        contacts_label = QLabel("Eye Color Shade:")
+        contacts_label.setStyleSheet("color: #a0a0a0; font-size: 11px;")
+        makeup_layout.addWidget(contacts_label)
+        
+        self.contacts_combo = QComboBox()
+        self.contacts_combo.addItems(["Natural", "Ocean Blue", "Emerald Green", "Honey Brown", "Deep Amber"])
+        self.contacts_combo.setStyleSheet(self.preset_combo.styleSheet())
+        self.contacts_combo.currentTextChanged.connect(self._on_slider_changed)
+        makeup_layout.addWidget(self.contacts_combo)
+        
+        self.slider_contacts_strength = PrecisionSlider("Eye Color Strength")
+        self.slider_contacts_strength.valueChanged.connect(self._on_slider_changed)
+        makeup_layout.addWidget(self.slider_contacts_strength)
+        
+        sidebar_layout.addWidget(makeup_group)
+        
+        # --- Group 2: Filter Sliders ---
+        sliders_group = QGroupBox("Beauty Adjustment Controls")
+        sliders_layout = QVBoxLayout(sliders_group)
+        sliders_layout.setSpacing(10)
+        
+        # Sliders declarations
+        self.slider_smoothing = PrecisionSlider("Skin Smoothing")
+        self.slider_brightening = PrecisionSlider("Skin Brightening")
+        self.slider_blush = PrecisionSlider("Blush / Warmth")
+        self.slider_eye = PrecisionSlider("Eye Enhancement")
+        self.slider_undereye = PrecisionSlider("Under-eye Lighten")
+        
+        # Add to layout
+        sliders_layout.addWidget(self.slider_smoothing)
+        sliders_layout.addWidget(self.slider_brightening)
+        sliders_layout.addWidget(self.slider_blush)
+        sliders_layout.addWidget(self.slider_undereye)
+        sliders_layout.addWidget(self.slider_eye)
+        
+        # Connect change signals to update preview
+        self.slider_smoothing.valueChanged.connect(self._on_slider_changed)
+        self.slider_brightening.valueChanged.connect(self._on_slider_changed)
+        self.slider_blush.valueChanged.connect(self._on_slider_changed)
+        self.slider_eye.valueChanged.connect(self._on_slider_changed)
+        self.slider_undereye.valueChanged.connect(self._on_slider_changed)
+        
+        sidebar_layout.addWidget(sliders_group)
+        
+        # --- Group 2.5: Face Reshaping Controls ---
+        reshaping_group = QGroupBox("Face Reshaping (Snapchat-style)")
+        reshaping_layout = QVBoxLayout(reshaping_group)
+        reshaping_layout.setSpacing(10)
+        
+        self.slider_nose = PrecisionSlider("Nose Size Reduce")
+        self.slider_cheeks = PrecisionSlider("Cheek Slimming")
+        self.slider_forehead = PrecisionSlider("Forehead Reduce")
+        self.slider_eye_size = PrecisionSlider("Eye Size (Enlarge)")
+        self.slider_lip_size = PrecisionSlider("Lip Size (Plump)")
+        
+        self.slider_nose.valueChanged.connect(self._on_slider_changed)
+        self.slider_cheeks.valueChanged.connect(self._on_slider_changed)
+        self.slider_forehead.valueChanged.connect(self._on_slider_changed)
+        self.slider_eye_size.valueChanged.connect(self._on_slider_changed)
+        self.slider_lip_size.valueChanged.connect(self._on_slider_changed)
+        
+        reshaping_layout.addWidget(self.slider_nose)
+        reshaping_layout.addWidget(self.slider_cheeks)
+        reshaping_layout.addWidget(self.slider_forehead)
+        reshaping_layout.addWidget(self.slider_eye_size)
+        reshaping_layout.addWidget(self.slider_lip_size)
+        sidebar_layout.addWidget(reshaping_group)
+        
+        # --- Group 3: Media Operations ---
+        media_group = QGroupBox("Source Selection")
+        media_layout = QVBoxLayout(media_group)
+        
+        self.open_video_btn = QPushButton("Select Video File")
+        self.open_video_btn.setIconSize(QSize(16, 16))
+        self.open_video_btn.clicked.connect(self._on_open_video)
+        
+        self.webcam_btn = QPushButton("Start Webcam Preview")
+        self.webcam_btn.clicked.connect(self._on_toggle_webcam)
+        
+        media_layout.addWidget(self.open_video_btn)
+        media_layout.addWidget(self.webcam_btn)
+        sidebar_layout.addWidget(media_group)
+        
+        # --- Group 4: Export Panel ---
+        export_group = QGroupBox("Resolve Compatibility Export")
+        export_layout = QVBoxLayout(export_group)
+        
+        codec_label = QLabel("Output Codec Profile:")
+        codec_label.setStyleSheet("color: #a0a0a0; font-size: 11px;")
+        export_layout.addWidget(codec_label)
+        
+        self.codec_combo = QComboBox()
+        self.codec_combo.addItems(list(CODEC_MAP.keys()))
+        self.codec_combo.setStyleSheet(self.preset_combo.styleSheet())
+        export_layout.addWidget(self.codec_combo)
+        
+        self.export_btn = QPushButton("Export Video")
+        self.export_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ff9f1c; /* Resolve Amber */
+                color: #121212;
+                font-weight: bold;
+                border: none;
+                border-radius: 4px;
+                padding: 10px;
+            }
+            QPushButton:hover {
+                background-color: #ffa834;
+            }
+            QPushButton:pressed {
+                background-color: #e68e14;
+            }
+            QPushButton:disabled {
+                background-color: #2b2b2b;
+                color: #5d5d5d;
+            }
+        """)
+        self.export_btn.clicked.connect(self._on_export_video)
+        self.export_btn.setEnabled(False)
+        export_layout.addWidget(self.export_btn)
+        
+        sidebar_layout.addWidget(export_group)
+        sidebar_layout.addStretch()
+        
+        scroll_area.setWidget(sidebar)
+        main_layout.addWidget(scroll_area)
+        
+        # ==========================================
+        # RIGHT PANEL (Viewer & Timeline Transport)
+        # ==========================================
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(15)
+        
+        # --- Viewer Comparison Modes Header ---
+        compare_header = QHBoxLayout()
+        compare_header.setSpacing(10)
+        
+        mode_label = QLabel("Comparison Mode:")
+        mode_label.setStyleSheet("color: #e0e0e0; font-weight: bold;")
+        compare_header.addWidget(mode_label)
+        
+        self.btn_mode_split = QPushButton("Split Screen")
+        self.btn_mode_split.setCheckable(True)
+        self.btn_mode_split.setChecked(True)
+        self.btn_mode_split.clicked.connect(lambda: self._set_compare_mode("split"))
+        
+        self.btn_mode_filtered = QPushButton("After (Filtered)")
+        self.btn_mode_filtered.setCheckable(True)
+        self.btn_mode_filtered.clicked.connect(lambda: self._set_compare_mode("processed"))
+        
+        self.btn_mode_original = QPushButton("Before (Original)")
+        self.btn_mode_original.setCheckable(True)
+        self.btn_mode_original.clicked.connect(lambda: self._set_compare_mode("original"))
+        
+        compare_header.addWidget(self.btn_mode_split)
+        compare_header.addWidget(self.btn_mode_filtered)
+        compare_header.addWidget(self.btn_mode_original)
+        compare_header.addStretch()
+        
+        right_layout.addLayout(compare_header)
+        
+        # --- Viewer ---
+        self.viewer = BeforeAfterViewer()
+        right_layout.addWidget(self.viewer, stretch=1)
+        
+        # --- Transport Bar ---
+        transport_widget = QWidget()
+        transport_widget.setStyleSheet("background-color: #1e1e1e; border-radius: 6px;")
+        transport_layout = QVBoxLayout(transport_widget)
+        transport_layout.setContentsMargins(10, 10, 10, 10)
+        
+        scrub_layout = QHBoxLayout()
+        self.time_label = QLabel("00:00:00 / 00:00:00")
+        self.time_label.setStyleSheet("color: #a0a0a0; font-family: monospace; font-size: 11px;")
+        
+        self.scrub_bar = QSlider(Qt.Orientation.Horizontal)
+        self.scrub_bar.setRange(0, 100)
+        self.scrub_bar.setValue(0)
+        self.scrub_bar.setEnabled(False)
+        self.scrub_bar.sliderMoved.connect(self._on_scrub_moved)
+        self.scrub_bar.sliderPressed.connect(self._on_scrub_pressed)
+        
+        scrub_layout.addWidget(self.scrub_bar)
+        scrub_layout.addWidget(self.time_label)
+        transport_layout.addLayout(scrub_layout)
+        
+        controls_layout = QHBoxLayout()
+        self.play_btn = QPushButton("Play")
+        self.play_btn.setFixedWidth(80)
+        self.play_btn.setEnabled(False)
+        self.play_btn.clicked.connect(self._on_toggle_play)
+        controls_layout.addWidget(self.play_btn)
+        
+        self.fps_label = QLabel("Source FPS: -")
+        self.fps_label.setStyleSheet("color: #a0a0a0; font-size: 12px;")
+        controls_layout.addStretch()
+        controls_layout.addWidget(self.fps_label)
+        controls_layout.addStretch()
+        
+        transport_layout.addLayout(controls_layout)
+        right_layout.addWidget(transport_widget)
+        
+        # --- Export Progress ---
+        self.progress_panel = QWidget()
+        self.progress_panel.setVisible(False)
+        progress_layout = QHBoxLayout(self.progress_panel)
+        progress_layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #3d3d3d;
+                border-radius: 4px;
+                text-align: center;
+                color: #fff;
+                font-weight: bold;
+                background-color: #1a1a1a;
+            }
+            QProgressBar::chunk {
+                background-color: #ff9f1c;
+                border-radius: 3px;
+            }
+        """)
+        self.eta_label = QLabel("ETA: Calculating...")
+        self.eta_label.setStyleSheet("color: #ff9f1c; font-weight: 500;")
+        
+        progress_layout.addWidget(self.progress_bar, stretch=1)
+        progress_layout.addWidget(self.eta_label)
+        right_layout.addWidget(self.progress_panel)
+        
+        main_layout.addWidget(right_panel, stretch=1)
+        
+        # StatusBar
+        self.statusBar().showMessage("Ready")
+        
+    def apply_theme(self):
+        # Complete charcoal dark style matching Resolve color palettes
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #121212;
+            }
+            QGroupBox {
+                border: 1px solid #2d2d2d;
+                border-radius: 6px;
+                margin-top: 10px;
+                padding-top: 15px;
+                font-weight: bold;
+                color: #ff9f1c;
+                font-size: 12px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                left: 10px;
+            }
+            QPushButton {
+                background-color: #2b2b2b;
+                color: #e0e0e0;
+                border: 1px solid #3d3d3d;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #383838;
+                border-color: #ff9f1c;
+            }
+            QPushButton:pressed {
+                background-color: #1f1f1f;
+            }
+            QPushButton:checked {
+                background-color: #ff9f1c;
+                color: #121212;
+                border-color: #ff9f1c;
+                font-weight: bold;
+            }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 12px;
+            }
+            QStatusBar {
+                background-color: #1a1a1a;
+                color: #8c8c8c;
+                font-size: 11px;
+                border-top: 1px solid #2a2a2a;
+            }
+        """)
+        
+    def setup_shortcuts(self):
+        # Space -> toggle preview play/pause
+        self.action_play = QAction(self)
+        self.action_play.setShortcut(QKeySequence(Qt.Key.Key_Space))
+        self.action_play.triggered.connect(self._on_toggle_play)
+        self.addAction(self.action_play)
+        
+        # Enter -> Trigger process export
+        self.action_process = QAction(self)
+        self.action_process.setShortcut(QKeySequence(Qt.Key.Key_Return))
+        self.action_process.triggered.connect(self._on_export_video)
+        self.addAction(self.action_process)
+        
+        # Ctrl+Q -> Quit app
+        self.action_quit = QAction(self)
+        self.action_quit.setShortcut(QKeySequence("Ctrl+Q"))
+        self.action_quit.triggered.connect(self.close)
+        self.addAction(self.action_quit)
+        
+    def load_default_presets(self):
+        for name in DEFAULT_PRESETS.keys():
+            self.preset_combo.addItem(name)
+        # Select first preset "Natural Glow"
+        self.preset_combo.setCurrentText("Natural Glow")
+        self._on_preset_selected("Natural Glow")
+        
+    def get_slider_params(self):
+        return {
+            "skin_smoothing": self.slider_smoothing.value(),
+            "blush_warmth": self.slider_blush.value(),
+            "skin_brightening": self.slider_brightening.value(),
+            "eye_enhancement": self.slider_eye.value(),
+            "undereye_lighten": self.slider_undereye.value(),
+            "nose_reduce": self.slider_nose.value(),
+            "cheeks_reduce": self.slider_cheeks.value(),
+            "forehead_reduce": self.slider_forehead.value(),
+            "eye_enlarge": self.slider_eye_size.value(),
+            "lips_plump": self.slider_lip_size.value(),
+            "lipstick_shade": self.lipstick_combo.currentText(),
+            "lipstick_strength": self.slider_lipstick_strength.value(),
+            "eye_color_shade": self.contacts_combo.currentText(),
+            "eye_color_strength": self.slider_contacts_strength.value(),
+            "color_look": self.look_combo.currentText(),
+            "look_intensity": self.slider_look_intensity.value()
+        }
+        
+    def update_sliders_ui(self, params):
+        # Block signals temporarily to prevent loop updates
+        self.slider_smoothing.blockSignals(True)
+        self.slider_brightening.blockSignals(True)
+        self.slider_blush.blockSignals(True)
+        self.slider_eye.blockSignals(True)
+        self.slider_undereye.blockSignals(True)
+        self.slider_nose.blockSignals(True)
+        self.slider_cheeks.blockSignals(True)
+        self.slider_forehead.blockSignals(True)
+        self.slider_eye_size.blockSignals(True)
+        self.slider_lip_size.blockSignals(True)
+        self.lipstick_combo.blockSignals(True)
+        self.slider_lipstick_strength.blockSignals(True)
+        self.contacts_combo.blockSignals(True)
+        self.slider_contacts_strength.blockSignals(True)
+        self.look_combo.blockSignals(True)
+        self.slider_look_intensity.blockSignals(True)
+        
+        self.slider_smoothing.setValue(params.get("skin_smoothing", 0.0))
+        self.slider_brightening.setValue(params.get("skin_brightening", 0.0))
+        self.slider_blush.setValue(params.get("blush_warmth", 0.0))
+        self.slider_eye.setValue(params.get("eye_enhancement", 0.0))
+        self.slider_undereye.setValue(params.get("undereye_lighten", 0.0))
+        
+        self.slider_nose.setValue(params.get("nose_reduce", 0.0))
+        self.slider_cheeks.setValue(params.get("cheeks_reduce", 0.0))
+        self.slider_forehead.setValue(params.get("forehead_reduce", 0.0))
+        self.slider_eye_size.setValue(params.get("eye_enlarge", 0.0))
+        self.slider_lip_size.setValue(params.get("lips_plump", 0.0))
+        self.lipstick_combo.setCurrentText(params.get("lipstick_shade", "None"))
+        self.slider_lipstick_strength.setValue(params.get("lipstick_strength", 0.0))
+        self.contacts_combo.setCurrentText(params.get("eye_color_shade", "Natural"))
+        self.slider_contacts_strength.setValue(params.get("eye_color_strength", 0.0))
+        self.look_combo.setCurrentText(params.get("color_look", "None"))
+        self.slider_look_intensity.setValue(params.get("look_intensity", 1.0))
+        
+        self.slider_smoothing.blockSignals(False)
+        self.slider_brightening.blockSignals(False)
+        self.slider_blush.blockSignals(False)
+        self.slider_eye.blockSignals(False)
+        self.slider_undereye.blockSignals(False)
+        self.slider_nose.blockSignals(False)
+        self.slider_cheeks.blockSignals(False)
+        self.slider_forehead.blockSignals(False)
+        self.slider_eye_size.blockSignals(False)
+        self.slider_lip_size.blockSignals(False)
+        self.lipstick_combo.blockSignals(False)
+        self.slider_lipstick_strength.blockSignals(False)
+        self.contacts_combo.blockSignals(False)
+        self.slider_contacts_strength.blockSignals(False)
+        self.look_combo.blockSignals(False)
+        self.slider_look_intensity.blockSignals(False)
+        
+        # Redraw screen
+        self._update_preview()
+
+    # ==========================================
+    # SLIDER AND PRESET SLOTS
+    # ==========================================
+    def _on_slider_changed(self):
+        # If webcam is running, sliders are read live by the webcam loop.
+        # Otherwise update static image preview
+        if self.webcam_thread is None:
+            self._update_preview()
+            
+    def _on_preset_selected(self, preset_name):
+        if preset_name in DEFAULT_PRESETS:
+            self.update_sliders_ui(DEFAULT_PRESETS[preset_name])
+            self.statusBar().showMessage(f"Preset loaded: {preset_name}")
+            
+    def _on_save_preset(self):
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Preset File", "", "JSON Files (*.json)"
+        )
+        if filepath:
+            params = self.get_slider_params()
+            if save_preset_to_file(filepath, params):
+                self.statusBar().showMessage(f"Saved custom preset: {os.path.basename(filepath)}")
+                
+    def _on_load_preset(self):
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Load Preset File", "", "JSON Files (*.json)"
+        )
+        if filepath:
+            params = load_preset_from_file(filepath)
+            if params:
+                self.update_sliders_ui(params)
+                self.preset_combo.setCurrentIndex(-1)  # Clear selection
+                self.statusBar().showMessage(f"Loaded preset file: {os.path.basename(filepath)}")
+            else:
+                QMessageBox.warning(self, "Preset Load Error", "Failed to parse the preset file.")
+
+    # ==========================================
+    # SOURCE SELECTOR SLOTS
+    # ==========================================
+    def _on_open_video(self):
+        # Stop webcam if running
+        if self.webcam_thread is not None:
+            self._on_toggle_webcam()
+            
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Select Source Video", "", 
+            "Video Files (*.mp4 *.mov *.avi *.mkv *.mxf)"
+        )
+        if filepath:
+            self.statusBar().showMessage(f"Loading video: {os.path.basename(filepath)}...")
+            self.open_video_btn.setEnabled(False)
+            
+            try:
+                # Release existing
+                if self.video_reader:
+                    self.video_reader.release()
+                    
+                self.video_reader = VideoReader(filepath)
+                self.current_frame_idx = 0
+                
+                # Setup seekbar slider
+                self.scrub_bar.setEnabled(True)
+                self.scrub_bar.setRange(0, self.video_reader.total_frames - 1)
+                self.scrub_bar.setValue(0)
+                
+                self.play_btn.setEnabled(True)
+                self.play_btn.setText("Play")
+                self.is_playing = False
+                
+                self.export_btn.setEnabled(True)
+                
+                # Update labels
+                self.fps_label.setText(f"Source FPS: {self.video_reader.fps:.2f} | {self.video_reader.width}x{self.video_reader.height}")
+                self._update_time_label()
+                
+                # Read first frame
+                self.active_frame = self.video_reader.read_frame(0)
+                self._update_preview()
+                
+                self.statusBar().showMessage(f"Loaded {os.path.basename(filepath)}")
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Video Load Error", f"Could not load video: {str(e)}")
+                self.statusBar().showMessage("Video loading failed")
+                
+            self.open_video_btn.setEnabled(True)
+
+    def _on_toggle_webcam(self):
+        # If webcam is running, turn it off
+        if self.webcam_thread is not None:
+            self.statusBar().showMessage("Stopping Webcam Preview...")
+            self.webcam_thread.stop()
+            self.webcam_thread.wait()
+            self.webcam_thread = None
+            
+            self.webcam_btn.setText("Start Webcam Preview")
+            self.webcam_btn.setChecked(False)
+            
+            self.active_frame = None
+            self.viewer.set_frames(None, None)
+            
+            # Re-enable controls if a video was previously loaded
+            if self.video_reader:
+                self.scrub_bar.setEnabled(True)
+                self.play_btn.setEnabled(True)
+                self.export_btn.setEnabled(True)
+                self.active_frame = self.video_reader.read_frame(self.current_frame_idx)
+                self._update_preview()
+            self.statusBar().showMessage("Webcam preview stopped")
+            
+        else:
+            # If playing video, pause it
+            if self.is_playing:
+                self._on_toggle_play()
+                
+            self.statusBar().showMessage("Starting Webcam Preview (Mirror Mode)...")
+            self.webcam_btn.setText("Stop Webcam")
+            self.webcam_btn.setChecked(True)
+            
+            # Disable video playback controls
+            self.scrub_bar.setEnabled(False)
+            self.play_btn.setEnabled(False)
+            self.export_btn.setEnabled(False)
+            
+            # Start Webcam worker thread
+            self.webcam_thread = WebcamThread(self.filter_engine, self.get_slider_params)
+            self.webcam_thread.frame_ready.connect(self._on_webcam_frame)
+            self.webcam_thread.error.connect(self._on_webcam_error)
+            self.webcam_thread.start()
+
+    def _on_webcam_frame(self, q_img, raw_frame):
+        # For split comparison screen in webcam mode, we need the original BGR
+        # frame and the processed image as BGR frame.
+        # Since WebcamThread emits the raw BGR frame and we already have the filters engine, 
+        # let's write a fast processing path.
+        # However, to avoid double mesh processing, we can let WebcamThread emit BOTH the raw frame
+        # and the processed QImage. To build the BeforeAfterViewer, it expects both NumPy arrays (BGR).
+        # Let's modify the viewer to support setting a direct processed BGR frame as well!
+        # Actually, in processor.py, WebcamThread emits (QImage, BGR original).
+        # We can construct the processed BGR frame in BeforeAfterViewer by converting QImage to numpy,
+        # or we can pass raw and processed NumPy frames from the WebcamThread.
+        # Let's see: in processor.py, processed is BGR! And it's already computed!
+        # Let's update processor.py if we need to. Wait, in processor.py:
+        # self.frame_ready.emit(q_img.copy(), frame)
+        # Here frame is the original BGR frame. We can convert the processed BGR image to NumPy!
+        # Wait, inside processor.py:
+        # `processed` is the BGR NumPy processed frame.
+        # We could modify WebcamThread to emit (BGR original, BGR processed). This is much cleaner!
+        # Let's look at what we wrote in processor.py:
+        # `self.frame_ready.emit(q_img.copy(), frame)`
+        # Ah, we emitted `q_img` and original BGR `frame`.
+        # To get the processed BGR NumPy array in the UI, we can just process it or change the signal.
+        # Let's write a small conversion or just modify WebcamThread to emit both NumPy arrays.
+        # Wait! In PyQt, emitting large NumPy arrays can occasionally be slow if done too rapidly,
+        # but is totally fine for 30fps.
+        # Let's just reconstruct the processed BGR image in the UI:
+        # Since the UI already has the original BGR raw_frame, we can just call self.filter_engine.process_frame on it,
+        # but wait, that would run the mesh twice (once in the thread and once in the UI). That is slow!
+        # Let's change the WebcamThread to emit the processed BGR array and original BGR array,
+        # or just convert the QImage back to BGR.
+        # Converting QImage back to BGR is very fast!
+        # But wait! We can also edit `core/processor.py` to make it emit `(np.ndarray, np.ndarray)`!
+        # Wait, the QImage can be drawn directly. If we look at the viewer:
+        # `self.viewer.set_frames(original, processed)` expects both to be numpy BGR arrays.
+        # So yes, let's just make the WebcamThread in `core/processor.py` emit `(np.ndarray, np.ndarray)` or let's convert `q_img` to BGR.
+        # Wait, converting QImage to numpy BGR:
+        # ```python
+        # width = q_img.width()
+        # height = q_img.height()
+        # ptr = q_img.bits()
+        # ptr.setsize(height * width * 4) # RGBA/RGB
+        # arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 4))
+        # ```
+        # Actually, let's just write a helper in main_window.py to convert:
+        # Or, even better, we can modify the viewer to accept both formats, or since we have `replace_file_content`
+        # we can easily modify the WebcamThread signal in `core/processor.py` to emit `(np.ndarray, np.ndarray)`!
+        # Wait, let's look at `core/processor.py`'s `WebcamThread` definition.
+        # The signal is: `frame_ready = pyqtSignal(QImage, np.ndarray)`
+        # If we change it to: `frame_ready = pyqtSignal(np.ndarray, np.ndarray)` (processed BGR, original BGR).
+        # Let's see if that is simpler.
+        # Wait! If we emit two numpy arrays, we can convert them to QImage inside the UI's paintEvent.
+        # In `ui/widgets.py`'s `BeforeAfterViewer.paintEvent`, it ALREADY converts BGR numpy arrays to QImage!
+        # Yes! `self.viewer.paintEvent` does:
+        # `q_original = self.numpy_to_qimage(self.original_frame)`
+        # `q_processed = self.numpy_to_qimage(self.processed_frame)`
+        # So yes! It expects BGR numpy arrays!
+        # Thus, if the WebcamThread simply emits two BGR NumPy arrays: `(processed BGR, original BGR)`,
+        # the main window can just do:
+        # `self.viewer.set_frames(original, processed)`
+        # This is incredibly clean! No QImage conversion in the thread, and the viewer does all the drawing conversion.
+        # Let's check: does it cause performance issues? No, NumPy arrays are just buffers, passing them via PyQt slots
+        # is very efficient on desktop.
+        # Let's modify `core/processor.py`'s `WebcamThread` to emit the processed BGR and original BGR.
+        # But wait! Let's first make sure if we can write main_window.py assuming we do that. Yes!
+        # In `main_window.py`:
+        # ```python
+        # def _on_webcam_frame(self, processed_frame, original_frame):
+        #     self.viewer.set_frames(original_frame, processed_frame)
+        # ```
+        # That is beautiful and simple!
+        pass
+        
+    def _on_webcam_frame(self, processed_frame, original_frame):
+        self.viewer.set_frames(original_frame, processed_frame)
+        
+    def _on_webcam_error(self, err_msg):
+        QMessageBox.critical(self, "Webcam Error", err_msg)
+        self._on_toggle_webcam()
+
+    # ==========================================
+    # PLAYBACK TIMELINE CONTROL SLOTS
+    # ==========================================
+    def _on_toggle_play(self):
+        if not self.video_reader:
+            return
+            
+        if self.is_playing:
+            self.video_timer.stop()
+            self.play_btn.setText("Play")
+            self.is_playing = False
+            self.statusBar().showMessage("Paused")
+        else:
+            # Calculate interval in ms
+            interval = int(1000.0 / self.video_reader.fps)
+            self.video_timer.start(interval)
+            self.play_btn.setText("Pause")
+            self.is_playing = True
+            self.statusBar().showMessage("Playing...")
+
+    def _on_play_step(self):
+        if not self.video_reader:
+            return
+            
+        next_idx = self.current_frame_idx + 1
+        if next_idx >= self.video_reader.total_frames:
+            # Loop around
+            next_idx = 0
+            
+        self.current_frame_idx = next_idx
+        
+        # Block signals on scrub bar so the user scrub position moves but doesn't trigger seek callbacks
+        self.scrub_bar.blockSignals(True)
+        self.scrub_bar.setValue(self.current_frame_idx)
+        self.scrub_bar.blockSignals(False)
+        
+        self._update_time_label()
+        
+        # Read frame
+        frame = self.video_reader.read_frame(self.current_frame_idx)
+        if frame is not None:
+            self.active_frame = frame
+            self._update_preview()
+
+    def _on_scrub_pressed(self):
+        # Pause playback during scrubbing
+        if self.is_playing:
+            self._on_toggle_play()
+
+    def _on_scrub_moved(self, frame_idx):
+        if not self.video_reader:
+            return
+            
+        self.current_frame_idx = frame_idx
+        self._update_time_label()
+        
+        frame = self.video_reader.read_frame(self.current_frame_idx)
+        if frame is not None:
+            self.active_frame = frame
+            self._update_preview()
+
+    def _update_time_label(self):
+        if not self.video_reader:
+            return
+            
+        curr_seconds = self.current_frame_idx / self.video_reader.fps
+        total_seconds = self.video_reader.total_frames / self.video_reader.fps
+        
+        def format_time(seconds):
+            h = int(seconds // 3600)
+            m = int((seconds % 3600) // 60)
+            s = int(seconds % 60)
+            ms = int((seconds % 1) * 100)
+            return f"{h:02d}:{m:02d}:{s:02d}.{ms:02d}"
+            
+        self.time_label.setText(f"{format_time(curr_seconds)} / {format_time(total_seconds)}")
+
+    def _set_compare_mode(self, mode):
+        # Sync widget check states
+        self.btn_mode_split.setChecked(mode == "split")
+        self.btn_mode_filtered.setChecked(mode == "processed")
+        self.btn_mode_original.setChecked(mode == "original")
+        
+        self.viewer.set_mode(mode)
+        
+    def _update_preview(self):
+        if self.active_frame is None:
+            return
+            
+        # For high-speed GUI responsiveness, downscale preview frame to max width 640px
+        params = self.get_slider_params()
+        processed = self.filter_engine.process_frame(self.active_frame, params, preview_width=640)
+        
+        # Match dimensions of original and processed frames for side-by-side comparison in viewer
+        original_preview = self.active_frame
+        h_p, w_p = processed.shape[:2]
+        h_o, w_o = original_preview.shape[:2]
+        if w_o != w_p or h_o != h_p:
+            original_preview = cv2.resize(original_preview, (w_p, h_p), interpolation=cv2.INTER_AREA)
+            
+        self.viewer.set_frames(original_preview, processed)
+
+    # ==========================================
+    # VIDEO EXPORT SLOTS
+    # ==========================================
+    def _on_export_video(self):
+        if not self.video_reader:
+            return
+            
+        # Pause playback if running
+        if self.is_playing:
+            self._on_toggle_play()
+            
+        # Open save file dialog
+        default_name = "beauty_" + os.path.basename(self.video_reader.filepath)
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Export Video As", default_name,
+            "Video Files (*.mov *.mp4)"
+        )
+        
+        if filepath:
+            self.statusBar().showMessage("Initializing export thread...")
+            self._set_export_ui_active(True)
+            
+            # Setup thread
+            codec = self.codec_combo.currentText()
+            params = self.get_slider_params()
+            
+            self.export_thread = VideoProcessorThread(
+                self.video_reader.filepath, filepath, codec, self.filter_engine, params
+            )
+            self.export_thread.progress.connect(self._on_export_progress)
+            self.export_thread.completed.connect(self._on_export_completed)
+            self.export_thread.error.connect(self._on_export_error)
+            self.export_thread.start()
+            
+    def _on_export_progress(self, frame_idx, percentage, eta_str):
+        self.progress_bar.setValue(int(percentage))
+        self.eta_label.setText(f"ETA: {eta_str}")
+        self.statusBar().showMessage(f"Processing frame {frame_idx} ({int(percentage)}%)")
+        
+    def _on_export_completed(self, output_path, use_fallback):
+        self._set_export_ui_active(False)
+        self.statusBar().showMessage(f"Export complete: {os.path.basename(output_path)}")
+        
+        msg = f"Video successfully exported to:\n{output_path}"
+        if use_fallback:
+            msg += "\n\nNote: The requested codec failed to initialize, so H.264 MP4 format was used as fallback."
+            
+        QMessageBox.information(self, "Export Successful", msg)
+        
+    def _on_export_error(self, err_msg):
+        self._set_export_ui_active(False)
+        self.statusBar().showMessage("Export failed")
+        QMessageBox.critical(self, "Export Error", f"An error occurred during video processing:\n{err_msg}")
+        
+    def _set_export_ui_active(self, active):
+        # Toggle buttons disable state to prevent concurrent modifications
+        self.open_video_btn.setEnabled(not active)
+        self.webcam_btn.setEnabled(not active)
+        self.export_btn.setEnabled(not active)
+        self.save_preset_btn.setEnabled(not active)
+        self.load_preset_btn.setEnabled(not active)
+        self.preset_combo.setEnabled(not active)
+        self.codec_combo.setEnabled(not active)
+        self.play_btn.setEnabled(not active)
+        
+        # Display progress panel
+        self.progress_panel.setVisible(active)
+        if active:
+            self.progress_bar.setValue(0)
+            self.eta_label.setText("ETA: Calculating...")
+            
+    def closeEvent(self, event):
+        # Shut down threads before quitting
+        if self.webcam_thread:
+            self.webcam_thread.stop()
+            self.webcam_thread.wait()
+        if self.export_thread:
+            self.export_thread.stop()
+            self.export_thread.wait()
+        if self.video_reader:
+            self.video_reader.release()
+        event.accept()
+
+    # ==========================================
+    # APP ICON AND MENUBAR INITIALIZATION
+    # ==========================================
+    def create_app_icon(self):
+        # Path to project root icon.png
+        icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "icon.png")
+        if not os.path.exists(icon_path):
+            pixmap = QPixmap(256, 256)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            
+            # Draw gradient background circle
+            grad = QLinearGradient(0, 0, 256, 256)
+            grad.setColorAt(0.0, QColor("#ff9f1c"))  # Resolve Amber
+            grad.setColorAt(1.0, QColor("#e63946"))  # Coral
+            
+            painter.setBrush(QBrush(grad))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(12, 12, 232, 232)
+            
+            # Draw camera lens rings outline in white
+            painter.setPen(QPen(QColor(255, 255, 255), 10, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(68, 68, 120, 120)
+            painter.drawEllipse(98, 98, 60, 60)
+            
+            # Draw beautiful sparkles at top-right
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 255, 255))
+            
+            # Stylized diamond star polygon
+            sparkle = QPolygonF([
+                QPointF(200, 50),
+                QPointF(206, 60),
+                QPointF(216, 66),
+                QPointF(206, 72),
+                QPointF(200, 82),
+                QPointF(194, 72),
+                QPointF(184, 66),
+                QPointF(194, 60)
+            ])
+            painter.drawPolygon(sparkle)
+            
+            painter.end()
+            
+            try:
+                pixmap.save(icon_path, "PNG")
+            except Exception as e:
+                print(f"Failed to save icon.png: {e}")
+                
+        self.setWindowIcon(QIcon(icon_path))
+
+    def setup_menu_bar(self):
+        menubar = self.menuBar()
+        menubar.setStyleSheet("""
+            QMenuBar {
+                background-color: #1a1a1a;
+                color: #e0e0e0;
+                border-bottom: 1px solid #2a2a2a;
+                font-weight: 500;
+            }
+            QMenuBar::item {
+                background-color: transparent;
+                padding: 6px 12px;
+            }
+            QMenuBar::item:selected {
+                background-color: #ff9f1c;
+                color: #121212;
+                font-weight: bold;
+            }
+            QMenu {
+                background-color: #1a1a1a;
+                color: #e0e0e0;
+                border: 1px solid #2d2d2d;
+            }
+            QMenu::item {
+                padding: 6px 20px 6px 25px;
+            }
+            QMenu::item:selected {
+                background-color: #ff9f1c;
+                color: #121212;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #2d2d2d;
+                margin: 4px 0px;
+            }
+        """)
+        
+        # 1. File Menu
+        file_menu = menubar.addMenu("File")
+        
+        open_action = QAction("Open Video File...", self)
+        open_action.setShortcut("Ctrl+O")
+        open_action.triggered.connect(self._on_open_video)
+        file_menu.addAction(open_action)
+        
+        file_menu.addSeparator()
+        
+        save_preset_action = QAction("Save Preset As...", self)
+        save_preset_action.setShortcut("Ctrl+S")
+        save_preset_action.triggered.connect(self._on_save_preset)
+        file_menu.addAction(save_preset_action)
+        
+        load_preset_action = QAction("Load Preset File...", self)
+        load_preset_action.setShortcut("Ctrl+L")
+        load_preset_action.triggered.connect(self._on_load_preset)
+        file_menu.addAction(load_preset_action)
+        
+        file_menu.addSeparator()
+        
+        exit_action = QAction("Exit", self)
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # 2. View Menu
+        view_menu = menubar.addMenu("View")
+        
+        split_action = QAction("Split Screen Mode", self)
+        split_action.triggered.connect(lambda: self._set_compare_mode("split"))
+        view_menu.addAction(split_action)
+        
+        filtered_action = QAction("Filtered (After) Mode", self)
+        filtered_action.triggered.connect(lambda: self._set_compare_mode("processed"))
+        view_menu.addAction(filtered_action)
+        
+        original_action = QAction("Original (Before) Mode", self)
+        original_action.triggered.connect(lambda: self._set_compare_mode("original"))
+        view_menu.addAction(original_action)
+        
+        # 3. Help Menu
+        help_menu = menubar.addMenu("Help")
+        
+        shortcuts_action = QAction("Shortcuts Reference...", self)
+        shortcuts_action.triggered.connect(self._on_shortcuts_triggered)
+        help_menu.addAction(shortcuts_action)
+        
+        about_action = QAction("About Resolve Beauty Companion...", self)
+        about_action.triggered.connect(self._on_about_triggered)
+        help_menu.addAction(about_action)
+
+    def _on_about_triggered(self):
+        QMessageBox.about(
+            self, "About Resolve Beauty Companion",
+            "<h3>Resolve Beauty Companion v1.0.0</h3>"
+            "<p>A professional high-performance companion app to DaVinci Resolve for real-time face smoothing and beauty filtering.</p>"
+            "<p>Features Snapchat-style face reshaping, bilateral skin smoothing, eye and cheek enhancements, and custom JSON preset management.</p>"
+            "<p>Built using PyQt6, OpenCV, MediaPipe Tasks, NumPy, and SciPy.</p>"
+            "<p><i>Copyright &copy; 2026. All rights reserved.</i></p>"
+        )
+        
+    def _on_shortcuts_triggered(self):
+        QMessageBox.information(
+            self, "Keyboard Shortcuts Reference",
+            "<b>Spacebar</b>: Toggle play/pause video preview (or freeze/resume webcam)<br>"
+            "<b>Enter / Return</b>: Trigger video export processing<br>"
+            "<b>Ctrl + O</b>: Open video file<br>"
+            "<b>Ctrl + S</b>: Save preset file<br>"
+            "<b>Ctrl + L</b>: Load preset file<br>"
+            "<b>Ctrl + Q</b>: Quit the application"
+        )
