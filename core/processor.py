@@ -4,6 +4,8 @@ import os
 from PyQt6.QtCore import QThread, pyqtSignal, QObject
 from PyQt6.QtGui import QImage, QPixmap
 import numpy as np
+import queue
+from threading import Thread
 
 CODEC_MAP = {
     "H.264 (MP4)": ("mp4v", ".mp4"),
@@ -36,6 +38,8 @@ class VideoProcessorThread(QThread):
         self._is_running = False
         
     def run(self):
+        errors = []
+        
         try:
             cap = cv2.VideoCapture(self.input_path)
             if not cap.isOpened():
@@ -90,51 +94,151 @@ class VideoProcessorThread(QThread):
                         return
             
             start_time = time.time()
-            frame_idx = 0
             
-            while self._is_running:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                    
-                # Process the frame
-                params_copy = self.params.copy()
-                if is_prores_alpha:
-                    params_copy['export_alpha'] = True
-                    
-                processed_frame = self.filter_engine.process_frame(frame, params_copy)
-                
-                # Write frame
-                if is_prores_alpha:
-                    # Convert BGR(A) to RGBA for PyAV
-                    frame_rgba = cv2.cvtColor(processed_frame, cv2.COLOR_BGRA2RGBA)
-                    av_frame = av.VideoFrame.from_ndarray(frame_rgba, format='rgba')
-                    for packet in stream.encode(av_frame):
-                        container.mux(packet)
-                else:
-                    writer.write(processed_frame)
-                
-                frame_idx += 1
-                
-                # Progress and ETA calculations
-                elapsed = time.time() - start_time
-                percentage = (frame_idx / total_frames) * 100.0
-                
-                # Calculate speed and ETA
-                current_fps = frame_idx / elapsed if elapsed > 0 else 0
-                remaining_frames = total_frames - frame_idx
-                eta_seconds = remaining_frames / current_fps if current_fps > 0 else 0
-                
-                # Format ETA
-                if eta_seconds > 60:
-                    eta_str = f"{int(eta_seconds // 60)}m {int(eta_seconds % 60)}s"
-                else:
-                    eta_str = f"{int(eta_seconds)}s"
-                    
-                self.progress.emit(frame_idx, percentage, eta_str)
-                
+            # Thread-safe queues
+            raw_queue = queue.Queue(maxsize=32)
+            processed_queue = queue.Queue(maxsize=32)
+            
+            params_copy = self.params.copy()
             if is_prores_alpha:
-                # Flush the stream
+                params_copy['export_alpha'] = True
+
+            def reader_worker():
+                nonlocal errors
+                try:
+                    frame_idx = 0
+                    while self._is_running:
+                        ret, frame = cap.read()
+                        if not ret or frame is None:
+                            break
+                        
+                        placed = False
+                        while self._is_running:
+                            try:
+                                raw_queue.put((frame_idx, frame), timeout=0.1)
+                                placed = True
+                                break
+                            except queue.Full:
+                                continue
+                        if not placed:
+                            break
+                        frame_idx += 1
+                except Exception as e:
+                    errors.append(f"Reader Thread error: {str(e)}")
+                    self._is_running = False
+                finally:
+                    try:
+                        raw_queue.put((None, None), timeout=1.0)
+                    except queue.Full:
+                        pass
+
+            def processor_worker():
+                nonlocal errors, params_copy
+                try:
+                    while self._is_running:
+                        frame_idx, frame = None, None
+                        got_item = False
+                        while self._is_running:
+                            try:
+                                frame_idx, frame = raw_queue.get(timeout=0.1)
+                                got_item = True
+                                break
+                            except queue.Empty:
+                                continue
+                        
+                        if not got_item or frame is None:
+                            break
+                            
+                        # Process the frame
+                        processed_frame = self.filter_engine.process_frame(frame, params_copy)
+                        
+                        placed = False
+                        while self._is_running:
+                            try:
+                                processed_queue.put((frame_idx, processed_frame), timeout=0.1)
+                                placed = True
+                                break
+                            except queue.Full:
+                                continue
+                        if not placed:
+                            break
+                except Exception as e:
+                    errors.append(f"Processor Thread error: {str(e)}")
+                    self._is_running = False
+                finally:
+                    try:
+                        processed_queue.put((None, None), timeout=1.0)
+                    except queue.Full:
+                        pass
+
+            def writer_worker():
+                nonlocal errors, is_prores_alpha, stream, container, writer, use_fallback, actual_output_path
+                try:
+                    written_count = 0
+                    while self._is_running:
+                        frame_idx, processed_frame = None, None
+                        got_item = False
+                        while self._is_running:
+                            try:
+                                frame_idx, processed_frame = processed_queue.get(timeout=0.1)
+                                got_item = True
+                                break
+                            except queue.Empty:
+                                continue
+                                
+                        if not got_item or processed_frame is None:
+                            break
+                            
+                        # Write frame
+                        if is_prores_alpha:
+                            frame_rgba = cv2.cvtColor(processed_frame, cv2.COLOR_BGRA2RGBA)
+                            av_frame = av.VideoFrame.from_ndarray(frame_rgba, format='rgba')
+                            for packet in stream.encode(av_frame):
+                                container.mux(packet)
+                        else:
+                            writer.write(processed_frame)
+                            
+                        written_count += 1
+                        
+                        # Progress and ETA calculations
+                        elapsed = time.time() - start_time
+                        percentage = (written_count / total_frames) * 100.0
+                        
+                        # Calculate speed and ETA
+                        current_fps = written_count / elapsed if elapsed > 0 else 0
+                        remaining_frames = total_frames - written_count
+                        eta_seconds = remaining_frames / current_fps if current_fps > 0 else 0
+                        
+                        # Format ETA
+                        if eta_seconds > 60:
+                            eta_str = f"{int(eta_seconds // 60)}m {int(eta_seconds % 60)}s"
+                        else:
+                            eta_str = f"{int(eta_seconds)}s"
+                            
+                        self.progress.emit(written_count, percentage, eta_str)
+                except Exception as e:
+                    errors.append(f"Writer Thread error: {str(e)}")
+                    self._is_running = False
+
+            # Start threads
+            t_reader = Thread(target=reader_worker, daemon=True)
+            t_processor = Thread(target=processor_worker, daemon=True)
+            t_writer = Thread(target=writer_worker, daemon=True)
+            
+            t_reader.start()
+            t_processor.start()
+            t_writer.start()
+            
+            # Wait for all threads to complete
+            while t_reader.is_alive() or t_processor.is_alive() or t_writer.is_alive():
+                t_reader.join(0.05)
+                t_processor.join(0.05)
+                t_writer.join(0.05)
+                if errors:
+                    self._is_running = False
+            
+            # Close/release
+            if is_prores_alpha:
                 for packet in stream.encode():
                     container.mux(packet)
                 container.close()
@@ -142,10 +246,13 @@ class VideoProcessorThread(QThread):
                 writer.release()
             cap.release()
             
+            if errors:
+                raise Exception("\n".join(errors))
+                
             if self._is_running:
                 self.completed.emit(actual_output_path, use_fallback)
             else:
-                # If stopped mid-run, clean up partially written file
+                # Cleanup if stopped
                 if os.path.exists(actual_output_path):
                     try:
                         os.remove(actual_output_path)

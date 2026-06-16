@@ -284,62 +284,103 @@ class BeautyFilterEngine:
             
         # Apply filters for each detected face using smoothed coordinates
         for coords in warped_faces_coords:
-            # 2. Generate skin mask (covers entire skin including nose)
-            skin_mask = self.get_skin_mask(processed, coords, params)
+            # 1. Define ROI bounding box around the face
+            face_min_y = np.min(coords[:, 1])
+            face_max_y = np.max(coords[:, 1])
+            face_min_x = np.min(coords[:, 0])
+            face_max_x = np.max(coords[:, 0])
+            
+            face_h = face_max_y - face_min_y
+            face_w = face_max_x - face_min_x
+            
+            # Check if body skin retouching is enabled to adjust ROI boundary
+            if params.get("enable_body_retouching", False):
+                ymin = int(max(0, face_min_y - face_h * 0.2))
+                ymax = h
+                xmin = int(max(0, face_min_x - face_w * 0.7))
+                xmax = int(min(w, face_max_x + face_w * 0.7))
+            else:
+                ymin = int(max(0, face_min_y - face_h * 0.25))
+                ymax = int(min(h, face_max_y + face_h * 0.25))
+                xmin = int(max(0, face_min_x - face_w * 0.25))
+                xmax = int(min(w, face_max_x + face_w * 0.25))
+                
+            if ymax <= ymin or xmax <= xmin:
+                continue
+                
+            # Crop the processed sub-image
+            processed_roi = processed[ymin:ymax, xmin:xmax]
+            
+            # Shift landmarks coordinates relative to the crop origin
+            coords_roi = coords - [xmin, ymin]
+            
+            # Crop accumulators if export_alpha is True
+            if export_alpha:
+                accum_color_roi = accum_color[ymin:ymax, xmin:xmax]
+                accum_alpha_roi = accum_alpha[ymin:ymax, xmin:xmax]
+                accumulators_roi = (accum_color_roi, accum_alpha_roi)
+            else:
+                accumulators_roi = None
+                
+            # 2. Generate skin mask (covers entire skin including nose) relative to ROI
+            skin_mask_roi = self.get_skin_mask(processed_roi, coords_roi, params)
             
             # 3. Apply skin brightening
             if params.get('skin_brightening', 0.0) > 0.001:
-                processed = self.apply_skin_brightening(processed, skin_mask, params['skin_brightening'], accumulators=accumulators)
+                processed_roi = self.apply_skin_brightening(processed_roi, skin_mask_roi, params['skin_brightening'], accumulators=accumulators_roi)
             
             # 4. Apply skin smoothing (with high-pass texture recovery)
             if params.get('skin_smoothing', 0.0) > 0.001:
                 texture_rec = params.get('skin_texture_recovery', 0.0)
-                processed = self.apply_skin_smoothing(processed, skin_mask, params['skin_smoothing'], texture_rec, accumulators=accumulators)
+                processed_roi = self.apply_skin_smoothing(processed_roi, skin_mask_roi, params['skin_smoothing'], texture_rec, accumulators=accumulators_roi)
                 
             # 5. Apply blush / warmth to cheeks
             if params.get('blush_warmth', 0.0) > 0.001:
-                processed = self.apply_blush(processed, coords, params['blush_warmth'], accumulators=accumulators)
+                processed_roi = self.apply_blush(processed_roi, coords_roi, params['blush_warmth'], accumulators=accumulators_roi)
                 
             # 6. Apply under-eye lighten
             if params.get('undereye_lighten', 0.0) > 0.001:
-                processed = self.apply_undereye_lighten(processed, coords, None, params['undereye_lighten'], accumulators=accumulators)
+                processed_roi = self.apply_undereye_lighten(processed_roi, coords_roi, None, params['undereye_lighten'], accumulators=accumulators_roi)
                 
             # 7. Apply eye enhancement (contrast & clarity)
             if params.get('eye_enhancement', 0.0) > 0.001:
-                processed = self.apply_eye_enhancement(processed, coords, params['eye_enhancement'], accumulators=accumulators)
+                processed_roi = self.apply_eye_enhancement(processed_roi, coords_roi, params['eye_enhancement'], accumulators=accumulators_roi)
                 
             # 7.5. Apply lips color makeup tint (lipstick overlay)
             lip_shade = params.get('lipstick_shade', 'None')
             lip_strength = params.get('lipstick_strength', 0.0)
             if lip_shade != 'None' and lip_strength > 0.001:
-                processed = self.apply_lipstick(processed, coords, lip_strength, lip_shade, accumulators=accumulators)
+                processed_roi = self.apply_lipstick(processed_roi, coords_roi, lip_strength, lip_shade, accumulators=accumulators_roi)
                 
             # 7.6. Apply eye color makeup tint (colored contact lenses)
             eye_color = params.get('eye_color_shade', 'Natural')
             eye_color_strength = params.get('eye_color_strength', 0.0)
             if eye_color != 'Natural' and eye_color_strength > 0.001:
-                processed = self.apply_eye_color(processed, coords, eye_color_strength, eye_color, accumulators=accumulators)
+                processed_roi = self.apply_eye_color(processed_roi, coords_roi, eye_color_strength, eye_color, accumulators=accumulators_roi)
                 
             # 7.7. Apply eyeliner & mascara
             eyeliner_strength = params.get('eyeliner_strength', 0.0)
             if eyeliner_strength > 0.001:
-                processed = self.apply_eyeliner(processed, coords, eyeliner_strength, accumulators=accumulators)
+                processed_roi = self.apply_eyeliner(processed_roi, coords_roi, eyeliner_strength, accumulators=accumulators_roi)
                 
             # 7.8. Apply eyeshadow gradients
             eyeshadow_shade = params.get('eyeshadow_shade', 'None')
             eyeshadow_strength = params.get('eyeshadow_strength', 0.0)
             if eyeshadow_shade != 'None' and eyeshadow_strength > 0.001:
-                processed = self.apply_eyeshadow(processed, coords, eyeshadow_strength, eyeshadow_shade, accumulators=accumulators)
+                processed_roi = self.apply_eyeshadow(processed_roi, coords_roi, eyeshadow_strength, eyeshadow_shade, accumulators=accumulators_roi)
                 
             # 7.9. Apply lip gloss specular highlights
             lip_gloss_strength = params.get('lip_gloss_strength', 0.0)
             if lip_gloss_strength > 0.001:
-                processed = self.apply_lip_gloss(processed, coords, lip_gloss_strength, accumulators=accumulators)
+                processed_roi = self.apply_lip_gloss(processed_roi, coords_roi, lip_gloss_strength, accumulators=accumulators_roi)
                 
             # 7.10. Apply facial highlighter
             highlighter_strength = params.get('facial_highlighter_strength', 0.0)
             if highlighter_strength > 0.001:
-                processed = self.apply_highlighter(processed, coords, highlighter_strength, accumulators=accumulators)
+                processed_roi = self.apply_highlighter(processed_roi, coords_roi, highlighter_strength, accumulators=accumulators_roi)
+                
+            # Paste the processed ROI back onto the main image
+            processed[ymin:ymax, xmin:xmax] = processed_roi
         
         if export_alpha:
             bgra = np.zeros((h, w, 4), dtype=np.uint8)
@@ -534,7 +575,30 @@ class BeautyFilterEngine:
         sigma_color = int(10 + 110 * strength)
         sigma_space = int(10 + 110 * strength)
         
-        smoothed = cv2.bilateralFilter(image, d, sigma_color, sigma_space)
+        h, w = image.shape[:2]
+        y_indices, x_indices = np.where(skin_mask > 0.01)
+        
+        if len(y_indices) > 0 and len(x_indices) > 0:
+            ymin, ymax = int(np.min(y_indices)), int(np.max(y_indices))
+            xmin, xmax = int(np.min(x_indices)), int(np.max(x_indices))
+            
+            # Add padding to avoid bilateral filtering edge artifacts
+            pad = int(d * 2)
+            ymin = max(0, ymin - pad)
+            ymax = min(h, ymax + pad)
+            xmin = max(0, xmin - pad)
+            xmax = min(w, xmax + pad)
+            
+            if (ymax > ymin) and (xmax > xmin):
+                roi = image[ymin:ymax, xmin:xmax]
+                smoothed_roi = cv2.bilateralFilter(roi, d, sigma_color, sigma_space)
+                
+                smoothed = image.copy()
+                smoothed[ymin:ymax, xmin:xmax] = smoothed_roi
+            else:
+                smoothed = cv2.bilateralFilter(image, d, sigma_color, sigma_space)
+        else:
+            smoothed = image.copy()
         
         mask_3d = np.expand_dims(skin_mask, axis=2)
         blend_factor = mask_3d * strength * 0.92
