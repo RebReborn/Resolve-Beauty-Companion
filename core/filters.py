@@ -181,6 +181,27 @@ class BeautyFilterEngine:
             eye_color_strength = params.get('eye_color_strength', 0.0)
             if eye_color != 'Natural' and eye_color_strength > 0.001:
                 processed = self.apply_eye_color(processed, coords, eye_color_strength, eye_color, accumulators=accumulators)
+                
+            # 7.7. Apply eyeliner & mascara
+            eyeliner_strength = params.get('eyeliner_strength', 0.0)
+            if eyeliner_strength > 0.001:
+                processed = self.apply_eyeliner(processed, coords, eyeliner_strength, accumulators=accumulators)
+                
+            # 7.8. Apply eyeshadow gradients
+            eyeshadow_shade = params.get('eyeshadow_shade', 'None')
+            eyeshadow_strength = params.get('eyeshadow_strength', 0.0)
+            if eyeshadow_shade != 'None' and eyeshadow_strength > 0.001:
+                processed = self.apply_eyeshadow(processed, coords, eyeshadow_strength, eyeshadow_shade, accumulators=accumulators)
+                
+            # 7.9. Apply lip gloss specular highlights
+            lip_gloss_strength = params.get('lip_gloss_strength', 0.0)
+            if lip_gloss_strength > 0.001:
+                processed = self.apply_lip_gloss(processed, coords, lip_gloss_strength, accumulators=accumulators)
+                
+            # 7.10. Apply facial highlighter
+            highlighter_strength = params.get('facial_highlighter_strength', 0.0)
+            if highlighter_strength > 0.001:
+                processed = self.apply_highlighter(processed, coords, highlighter_strength, accumulators=accumulators)
         
         if export_alpha:
             bgra = np.zeros((h, w, 4), dtype=np.uint8)
@@ -782,3 +803,199 @@ class BeautyFilterEngine:
                 g_f = g / 255.0
                 b_f = b / 255.0
                 f.write(f"{r_f:.6f} {g_f:.6f} {b_f:.6f}\n")
+
+    def apply_eyeliner(self, image, coords, strength, accumulators=None):
+        h, w = image.shape[:2]
+        
+        # Calculate eye widths
+        left_eye_w = np.linalg.norm(coords[263] - coords[362])
+        right_eye_w = np.linalg.norm(coords[33] - coords[133])
+        avg_eye_w = (left_eye_w + right_eye_w) / 2.0
+        
+        # Eyeliner thickness
+        thickness = max(1, int(avg_eye_w * 0.06 * strength))
+        
+        eyeliner_mask = np.zeros((h, w), dtype=np.uint8)
+        
+        def rotate_vector(v, angle_rad):
+            cos_a = np.cos(angle_rad)
+            sin_a = np.sin(angle_rad)
+            return np.array([
+                v[0] * cos_a - v[1] * sin_a,
+                v[0] * sin_a + v[1] * cos_a
+            ], dtype=np.float32)
+            
+        # Left Eye (inner to outer: 362 to 263)
+        left_pts = coords[[362, 466, 388, 387, 386, 385, 384, 398, 263]]
+        v_eye_l = coords[263] - coords[362]
+        v_eye_l_unit = v_eye_l / (np.linalg.norm(v_eye_l) + 1e-6)
+        v_wing_l = rotate_vector(v_eye_l_unit, -0.35) * (left_eye_w * 0.22 * strength)
+        left_wing_tip = coords[263] + v_wing_l
+        left_path = np.vstack([left_pts, left_wing_tip.reshape(1, 2)]).astype(np.int32)
+        
+        # Right Eye (inner to outer: 133 to 33)
+        right_pts = coords[[133, 173, 157, 158, 159, 160, 161, 246, 33]]
+        v_eye_r = coords[33] - coords[133]
+        v_eye_r_unit = v_eye_r / (np.linalg.norm(v_eye_r) + 1e-6)
+        v_wing_r = rotate_vector(v_eye_r_unit, 0.35) * (right_eye_w * 0.22 * strength)
+        right_wing_tip = coords[33] + v_wing_r
+        right_path = np.vstack([right_pts, right_wing_tip.reshape(1, 2)]).astype(np.int32)
+        
+        cv2.polylines(eyeliner_mask, [left_path], isClosed=False, color=255, thickness=thickness)
+        cv2.polylines(eyeliner_mask, [right_path], isClosed=False, color=255, thickness=thickness)
+        
+        # Soften the eyeliner
+        blur_k = int(thickness * 0.6) | 1
+        if blur_k < 3:
+            blur_k = 3
+        eyeliner_mask_feathered = cv2.GaussianBlur(eyeliner_mask, (blur_k, blur_k), 0) / 255.0
+        eyeliner_mask_3d = np.expand_dims(eyeliner_mask_feathered, axis=2)
+        
+        eyeliner_color = np.array([15, 15, 15], dtype=np.float32)
+        
+        # Blend eyeliner (max opacity 90% at strength 1.0)
+        blend_factor = eyeliner_mask_3d * strength * 0.90
+        output = (image * (1.0 - blend_factor) + eyeliner_color * blend_factor).astype(np.uint8)
+        
+        if accumulators is not None:
+            accum_color, accum_alpha = accumulators
+            blend_1d = eyeliner_mask_feathered * strength * 0.90
+            accum_color[:] = accum_color * (1.0 - blend_factor) + eyeliner_color * blend_factor
+            accum_alpha[:] = accum_alpha * (1.0 - blend_1d) + blend_1d
+            
+        return output
+
+    def apply_eyeshadow(self, image, coords, strength, shade, accumulators=None):
+        if shade == "None" or strength <= 0.001:
+            return image
+            
+        h, w = image.shape[:2]
+        
+        # Calculate average eye width for blur size
+        left_eye_w = np.linalg.norm(coords[263] - coords[362])
+        right_eye_w = np.linalg.norm(coords[33] - coords[133])
+        avg_eye_w = (left_eye_w + right_eye_w) / 2.0
+        
+        eyeshadow_mask = np.zeros((h, w), dtype=np.uint8)
+        
+        # Left Eye socket polygon
+        left_eyelid = coords[[362, 466, 388, 387, 386, 385, 384, 398, 263]]
+        left_eyebrow = coords[[300, 293, 334, 296, 336]]
+        left_poly = np.vstack([left_eyelid, left_eyebrow]).astype(np.int32)
+        cv2.fillConvexPoly(eyeshadow_mask, cv2.convexHull(left_poly), 255)
+        
+        # Right Eye socket polygon
+        right_eyelid = coords[[133, 173, 157, 158, 159, 160, 161, 246, 33]]
+        right_eyebrow = coords[[107, 66, 105, 63, 70]]
+        right_poly = np.vstack([right_eyelid, right_eyebrow]).astype(np.int32)
+        cv2.fillConvexPoly(eyeshadow_mask, cv2.convexHull(right_poly), 255)
+        
+        # Apply strong Gaussian blur (50% of eye width)
+        blur_k = int(avg_eye_w * 0.50) | 1
+        if blur_k < 3:
+            blur_k = 3
+        eyeshadow_mask_feathered = cv2.GaussianBlur(eyeshadow_mask, (blur_k, blur_k), 0) / 255.0
+        eyeshadow_mask_3d = np.expand_dims(eyeshadow_mask_feathered, axis=2)
+        
+        color_table = {
+            "Royal Purple": np.array([140, 30, 100], dtype=np.float32),
+            "Rose Gold": np.array([140, 130, 220], dtype=np.float32),
+            "Sunset Bronze": np.array([50, 110, 200], dtype=np.float32),
+            "Ocean Blue": np.array([180, 120, 30], dtype=np.float32)
+        }
+        eyeshadow_color = color_table.get(shade, np.array([140, 30, 100], dtype=np.float32))
+        
+        # Blend eyeshadow (max opacity 45% at strength 1.0)
+        blend_factor = eyeshadow_mask_3d * strength * 0.45
+        output = (image * (1.0 - blend_factor) + eyeshadow_color * blend_factor).astype(np.uint8)
+        
+        if accumulators is not None:
+            accum_color, accum_alpha = accumulators
+            blend_1d = eyeshadow_mask_feathered * strength * 0.45
+            accum_color[:] = accum_color * (1.0 - blend_factor) + eyeshadow_color * blend_factor
+            accum_alpha[:] = accum_alpha * (1.0 - blend_1d) + blend_1d
+            
+        return output
+
+    def apply_lip_gloss(self, image, coords, strength, accumulators=None):
+        if strength <= 0.001:
+            return image
+            
+        h, w = image.shape[:2]
+        lips_width = np.linalg.norm(coords[61] - coords[291])
+        
+        gloss_mask = np.zeros((h, w), dtype=np.uint8)
+        
+        # Center coordinates
+        top_center = (coords[13] * 0.45 + coords[0] * 0.55).astype(np.int32)
+        bottom_center = (coords[14] * 0.45 + coords[17] * 0.55).astype(np.int32)
+        
+        # Ellipse axes
+        axes_top = (int(lips_width * 0.12), int(lips_width * 0.04))
+        axes_bottom = (int(lips_width * 0.16), int(lips_width * 0.05))
+        
+        # Draw ellipses on mask
+        cv2.ellipse(gloss_mask, tuple(top_center), axes_top, 0, 0, 360, 255, -1)
+        cv2.ellipse(gloss_mask, tuple(bottom_center), axes_bottom, 0, 0, 360, 255, -1)
+        
+        # Apply blur
+        blur_k = int(lips_width * 0.08) | 1
+        if blur_k < 3:
+            blur_k = 3
+        gloss_mask_feathered = cv2.GaussianBlur(gloss_mask, (blur_k, blur_k), 0) / 255.0
+        gloss_mask_feathered_3d = np.expand_dims(gloss_mask_feathered, axis=2)
+        
+        # White highlight color
+        gloss_color = np.array([255, 255, 255], dtype=np.float32)
+        blend_factor = gloss_mask_feathered_3d * strength * 0.60
+        
+        # Screen blend
+        output = image.astype(np.float32) + (gloss_color - image.astype(np.float32)) * blend_factor
+        output = np.clip(output, 0, 255).astype(np.uint8)
+        
+        if accumulators is not None:
+            accum_color, accum_alpha = accumulators
+            blend_1d = gloss_mask_feathered * strength * 0.60
+            accum_color[:] = accum_color + (gloss_color - accum_color) * blend_factor
+            accum_alpha[:] = accum_alpha * (1.0 - blend_1d) + blend_1d
+            
+        return output
+
+    def apply_highlighter(self, image, coords, strength, accumulators=None):
+        if strength <= 0.001:
+            return image
+            
+        h, w = image.shape[:2]
+        face_width = np.linalg.norm(coords[234] - coords[454])
+        
+        highlighter_mask = np.zeros((h, w), dtype=np.uint8)
+        
+        # Cheekbones
+        cv2.circle(highlighter_mask, tuple(coords[353]), int(face_width * 0.08), 255, -1)
+        cv2.circle(highlighter_mask, tuple(coords[124]), int(face_width * 0.08), 255, -1)
+        
+        # Nose bridge
+        nose_pts = coords[[168, 6, 197, 195]].astype(np.int32)
+        cv2.polylines(highlighter_mask, [nose_pts], isClosed=False, color=255, thickness=int(face_width * 0.04))
+        
+        # Apply Gaussian blur
+        blur_k = int(face_width * 0.12) | 1
+        if blur_k < 3:
+            blur_k = 3
+        highlighter_mask_feathered = cv2.GaussianBlur(highlighter_mask, (blur_k, blur_k), 0) / 255.0
+        highlighter_mask_feathered_3d = np.expand_dims(highlighter_mask_feathered, axis=2)
+        
+        # Champagne gold color: [180, 220, 255] in BGR
+        highlighter_color = np.array([180, 220, 255], dtype=np.float32)
+        blend_factor = highlighter_mask_feathered_3d * strength * 0.35
+        
+        output = image.astype(np.float32) + (highlighter_color - image.astype(np.float32)) * blend_factor
+        output = np.clip(output, 0, 255).astype(np.uint8)
+        
+        if accumulators is not None:
+            accum_color, accum_alpha = accumulators
+            blend_1d = highlighter_mask_feathered * strength * 0.35
+            accum_color[:] = accum_color + (highlighter_color - accum_color) * blend_factor
+            accum_alpha[:] = accum_alpha * (1.0 - blend_1d) + blend_1d
+            
+        return output

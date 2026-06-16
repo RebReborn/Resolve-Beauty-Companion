@@ -19,7 +19,12 @@ DEFAULT_PRESETS = {
         "eye_color_shade": "Natural",
         "eye_color_strength": 0.00,
         "color_look": "None",
-        "look_intensity": 1.00
+        "look_intensity": 1.00,
+        "eyeliner_strength": 0.00,
+        "eyeshadow_shade": "None",
+        "eyeshadow_strength": 0.00,
+        "lip_gloss_strength": 0.20,
+        "facial_highlighter_strength": 0.15
     },
     "Hollywood Smooth": {
         "skin_smoothing": 0.65,
@@ -38,7 +43,12 @@ DEFAULT_PRESETS = {
         "eye_color_shade": "Natural",
         "eye_color_strength": 0.00,
         "color_look": "Warm Sunset",
-        "look_intensity": 0.60
+        "look_intensity": 0.60,
+        "eyeliner_strength": 0.35,
+        "eyeshadow_shade": "Rose Gold",
+        "eyeshadow_strength": 0.30,
+        "lip_gloss_strength": 0.40,
+        "facial_highlighter_strength": 0.30
     },
     "High Glamour": {
         "skin_smoothing": 0.80,
@@ -57,7 +67,12 @@ DEFAULT_PRESETS = {
         "eye_color_shade": "Ocean Blue",
         "eye_color_strength": 0.45,
         "color_look": "Teal & Orange",
-        "look_intensity": 0.75
+        "look_intensity": 0.75,
+        "eyeliner_strength": 0.60,
+        "eyeshadow_shade": "Royal Purple",
+        "eyeshadow_strength": 0.50,
+        "lip_gloss_strength": 0.65,
+        "facial_highlighter_strength": 0.55
     },
     "Subtle Polish": {
         "skin_smoothing": 0.15,
@@ -76,7 +91,12 @@ DEFAULT_PRESETS = {
         "eye_color_shade": "Natural",
         "eye_color_strength": 0.00,
         "color_look": "None",
-        "look_intensity": 1.00
+        "look_intensity": 1.00,
+        "eyeliner_strength": 0.00,
+        "eyeshadow_shade": "None",
+        "eyeshadow_strength": 0.00,
+        "lip_gloss_strength": 0.10,
+        "facial_highlighter_strength": 0.05
     },
     "Default Reset": {
         "skin_smoothing": 0.00,
@@ -95,7 +115,12 @@ DEFAULT_PRESETS = {
         "eye_color_shade": "Natural",
         "eye_color_strength": 0.00,
         "color_look": "None",
-        "look_intensity": 1.00
+        "look_intensity": 1.00,
+        "eyeliner_strength": 0.00,
+        "eyeshadow_shade": "None",
+        "eyeshadow_strength": 0.00,
+        "lip_gloss_strength": 0.00,
+        "facial_highlighter_strength": 0.00
     }
 }
 
@@ -136,7 +161,12 @@ def load_preset_from_file(filepath):
             "eye_color_shade": "Natural",
             "eye_color_strength": 0.0,
             "color_look": "None",
-            "look_intensity": 1.0
+            "look_intensity": 1.0,
+            "eyeliner_strength": 0.0,
+            "eyeshadow_shade": "None",
+            "eyeshadow_strength": 0.0,
+            "lip_gloss_strength": 0.0,
+            "facial_highlighter_strength": 0.0
         }
         for key, default in required_keys.items():
             if key not in params:

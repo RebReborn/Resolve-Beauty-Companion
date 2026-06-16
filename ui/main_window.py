@@ -149,8 +149,8 @@ class MainWindow(QMainWindow):
         looks_layout.addWidget(self.slider_look_intensity)
         sidebar_layout.addWidget(looks_group)
         
-        # --- Group 1.6: Makeup Color Overlays ---
-        makeup_group = QGroupBox("Makeup Color Overlays")
+        # --- Group 1.6: Virtual Cosmetics Suite ---
+        makeup_group = QGroupBox("Virtual Cosmetics Suite")
         makeup_layout = QVBoxLayout(makeup_group)
         makeup_layout.setSpacing(6)
         
@@ -167,6 +167,10 @@ class MainWindow(QMainWindow):
         self.slider_lipstick_strength = PrecisionSlider("Lipstick Strength")
         self.slider_lipstick_strength.valueChanged.connect(self._on_slider_changed)
         makeup_layout.addWidget(self.slider_lipstick_strength)
+
+        self.slider_lip_gloss_strength = PrecisionSlider("Lip Gloss (Specular)")
+        self.slider_lip_gloss_strength.valueChanged.connect(self._on_slider_changed)
+        makeup_layout.addWidget(self.slider_lip_gloss_strength)
         
         contacts_label = QLabel("Eye Color Shade:")
         contacts_label.setStyleSheet("color: #a0a0a0; font-size: 11px;")
@@ -181,6 +185,28 @@ class MainWindow(QMainWindow):
         self.slider_contacts_strength = PrecisionSlider("Eye Color Strength")
         self.slider_contacts_strength.valueChanged.connect(self._on_slider_changed)
         makeup_layout.addWidget(self.slider_contacts_strength)
+
+        self.slider_eyeliner_strength = PrecisionSlider("Eyeliner & Mascara")
+        self.slider_eyeliner_strength.valueChanged.connect(self._on_slider_changed)
+        makeup_layout.addWidget(self.slider_eyeliner_strength)
+
+        eyeshadow_label = QLabel("Eyeshadow Shade:")
+        eyeshadow_label.setStyleSheet("color: #a0a0a0; font-size: 11px;")
+        makeup_layout.addWidget(eyeshadow_label)
+
+        self.eyeshadow_combo = QComboBox()
+        self.eyeshadow_combo.addItems(["None", "Royal Purple", "Rose Gold", "Sunset Bronze", "Ocean Blue"])
+        self.eyeshadow_combo.setStyleSheet(self.preset_combo.styleSheet())
+        self.eyeshadow_combo.currentTextChanged.connect(self._on_slider_changed)
+        makeup_layout.addWidget(self.eyeshadow_combo)
+
+        self.slider_eyeshadow_strength = PrecisionSlider("Eyeshadow Strength")
+        self.slider_eyeshadow_strength.valueChanged.connect(self._on_slider_changed)
+        makeup_layout.addWidget(self.slider_eyeshadow_strength)
+
+        self.slider_facial_highlighter_strength = PrecisionSlider("Facial Highlighter")
+        self.slider_facial_highlighter_strength.valueChanged.connect(self._on_slider_changed)
+        makeup_layout.addWidget(self.slider_facial_highlighter_strength)
         
         sidebar_layout.addWidget(makeup_group)
         
@@ -534,7 +560,12 @@ class MainWindow(QMainWindow):
             "eye_color_shade": self.contacts_combo.currentText(),
             "eye_color_strength": self.slider_contacts_strength.value(),
             "color_look": self.look_combo.currentText(),
-            "look_intensity": self.slider_look_intensity.value()
+            "look_intensity": self.slider_look_intensity.value(),
+            "eyeliner_strength": self.slider_eyeliner_strength.value(),
+            "eyeshadow_shade": self.eyeshadow_combo.currentText(),
+            "eyeshadow_strength": self.slider_eyeshadow_strength.value(),
+            "lip_gloss_strength": self.slider_lip_gloss_strength.value(),
+            "facial_highlighter_strength": self.slider_facial_highlighter_strength.value()
         }
         
     def update_sliders_ui(self, params):
@@ -556,6 +587,11 @@ class MainWindow(QMainWindow):
         self.slider_contacts_strength.blockSignals(True)
         self.look_combo.blockSignals(True)
         self.slider_look_intensity.blockSignals(True)
+        self.slider_eyeliner_strength.blockSignals(True)
+        self.eyeshadow_combo.blockSignals(True)
+        self.slider_eyeshadow_strength.blockSignals(True)
+        self.slider_lip_gloss_strength.blockSignals(True)
+        self.slider_facial_highlighter_strength.blockSignals(True)
         
         self.slider_smoothing.setValue(params.get("skin_smoothing", 0.0))
         self.slider_texture_recovery.setValue(params.get("skin_texture_recovery", 0.0))
@@ -575,6 +611,11 @@ class MainWindow(QMainWindow):
         self.slider_contacts_strength.setValue(params.get("eye_color_strength", 0.0))
         self.look_combo.setCurrentText(params.get("color_look", "None"))
         self.slider_look_intensity.setValue(params.get("look_intensity", 1.0))
+        self.slider_eyeliner_strength.setValue(params.get("eyeliner_strength", 0.0))
+        self.eyeshadow_combo.setCurrentText(params.get("eyeshadow_shade", "None"))
+        self.slider_eyeshadow_strength.setValue(params.get("eyeshadow_strength", 0.0))
+        self.slider_lip_gloss_strength.setValue(params.get("lip_gloss_strength", 0.0))
+        self.slider_facial_highlighter_strength.setValue(params.get("facial_highlighter_strength", 0.0))
         
         self.slider_smoothing.blockSignals(False)
         self.slider_texture_recovery.blockSignals(False)
@@ -593,6 +634,11 @@ class MainWindow(QMainWindow):
         self.slider_contacts_strength.blockSignals(False)
         self.look_combo.blockSignals(False)
         self.slider_look_intensity.blockSignals(False)
+        self.slider_eyeliner_strength.blockSignals(False)
+        self.eyeshadow_combo.blockSignals(False)
+        self.slider_eyeshadow_strength.blockSignals(False)
+        self.slider_lip_gloss_strength.blockSignals(False)
+        self.slider_facial_highlighter_strength.blockSignals(False)
         
         # Redraw screen
         self._update_preview()
@@ -1325,6 +1371,10 @@ class InstructionManualDialog(QDialog):
             <li><b>Lip Size (Plump):</b> Bulge warp centered on mouth coordinates to plump the lips.</li>
             <li><b>Lipstick Shade & Strength:</b> Color makeup overlay on the lip contour (Rose Red, Soft Pink, Peach Glow, Plum Berry).</li>
             <li><b>Eye Color Shade & Strength:</b> Colored contact lens overlay on the iris boundaries (Ocean Blue, Emerald Green, Honey Brown, Deep Amber).</li>
+            <li><b>Eyeliner & Mascara:</b> Draws a thick, dark, winged line along the upper eyelids with soft blurring to simulate mascara volume.</li>
+            <li><b>Eyeshadow Shade & Strength:</b> Applies a feathery, multi-colored gradient on the upper eyelids and socket regions.</li>
+            <li><b>Lip Gloss (Specular):</b> Overlays shimmering, screen-blended specular highlights on the upper and lower lips.</li>
+            <li><b>Facial Highlighter:</b> Adds subtle, screen-blended champagne gold highlights on the cheekbones and nose bridge for a three-dimensional contouring effect.</li>
         </ul>
 
         <h2>3. Cinematic Looks & 3D LUT Export</h2>
