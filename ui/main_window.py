@@ -1,6 +1,7 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QComboBox, QFileDialog, QLabel, 
-                             QProgressBar, QGroupBox, QMessageBox, QSlider, QScrollArea)
+                             QProgressBar, QGroupBox, QMessageBox, QSlider, QScrollArea,
+                             QCheckBox)
 from PyQt6.QtCore import Qt, QTimer, QSize, QPointF
 from PyQt6.QtGui import QAction, QKeySequence, QIcon, QImage, QPainter, QPixmap, QColor, QPen, QBrush, QLinearGradient, QPolygonF
 import os
@@ -13,7 +14,7 @@ from core.processor import VideoProcessorThread, WebcamThread, VideoReader, CODE
 from utils.presets import DEFAULT_PRESETS, save_preset_to_file, load_preset_from_file
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, clip_path=None):
         super().__init__()
         self.setWindowTitle("Resolve Beauty Companion")
         self.setMinimumSize(QSize(1200, 800))
@@ -39,6 +40,10 @@ class MainWindow(QMainWindow):
         self.setup_shortcuts()
         self.create_app_icon()
         self.setup_menu_bar()
+        
+        # Auto-load clip if provided
+        if clip_path:
+            QTimer.singleShot(100, lambda: self.load_video_from_path(clip_path))
         
     def init_ui(self):
         # Main central widget
@@ -242,10 +247,14 @@ class MainWindow(QMainWindow):
         self.open_video_btn.setIconSize(QSize(16, 16))
         self.open_video_btn.clicked.connect(self._on_open_video)
         
+        self.sync_resolve_btn = QPushButton("Sync Clip from Resolve")
+        self.sync_resolve_btn.clicked.connect(self._on_sync_resolve)
+        
         self.webcam_btn = QPushButton("Start Webcam Preview")
         self.webcam_btn.clicked.connect(self._on_toggle_webcam)
         
         media_layout.addWidget(self.open_video_btn)
+        media_layout.addWidget(self.sync_resolve_btn)
         media_layout.addWidget(self.webcam_btn)
         sidebar_layout.addWidget(media_group)
         
@@ -260,7 +269,30 @@ class MainWindow(QMainWindow):
         self.codec_combo = QComboBox()
         self.codec_combo.addItems(list(CODEC_MAP.keys()))
         self.codec_combo.setStyleSheet(self.preset_combo.styleSheet())
+        self.codec_combo.currentTextChanged.connect(self._on_codec_changed)
         export_layout.addWidget(self.codec_combo)
+        
+        self.export_alpha_checkbox = QCheckBox("Export Alpha Overlay Only")
+        self.export_alpha_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #e0e0e0;
+                font-size: 11px;
+                margin-top: 5px;
+                margin-bottom: 5px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                background-color: #1a1a1a;
+                border: 1px solid #3d3d3d;
+                border-radius: 3px;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #ff9f1c;
+            }
+        """)
+        self.export_alpha_checkbox.stateChanged.connect(self._on_export_alpha_toggled)
+        export_layout.addWidget(self.export_alpha_checkbox)
         
         self.export_btn = QPushButton("Export Video")
         self.export_btn.setStyleSheet("""
@@ -614,43 +646,91 @@ class MainWindow(QMainWindow):
             "Video Files (*.mp4 *.mov *.avi *.mkv *.mxf)"
         )
         if filepath:
-            self.statusBar().showMessage(f"Loading video: {os.path.basename(filepath)}...")
-            self.open_video_btn.setEnabled(False)
+            self.load_video_from_path(filepath)
+
+    def load_video_from_path(self, filepath):
+        self.statusBar().showMessage(f"Loading video: {os.path.basename(filepath)}...")
+        self.open_video_btn.setEnabled(False)
+        
+        try:
+            # Release existing
+            if self.video_reader:
+                self.video_reader.release()
+                
+            self.video_reader = VideoReader(filepath)
+            self.current_frame_idx = 0
             
-            try:
-                # Release existing
-                if self.video_reader:
-                    self.video_reader.release()
-                    
-                self.video_reader = VideoReader(filepath)
-                self.current_frame_idx = 0
+            # Setup seekbar slider
+            self.scrub_bar.setEnabled(True)
+            self.scrub_bar.setRange(0, self.video_reader.total_frames - 1)
+            self.scrub_bar.setValue(0)
+            
+            self.play_btn.setEnabled(True)
+            self.play_btn.setText("Play")
+            self.is_playing = False
+            
+            self.export_btn.setEnabled(True)
+            
+            # Update labels
+            self.fps_label.setText(f"Source FPS: {self.video_reader.fps:.2f} | {self.video_reader.width}x{self.video_reader.height}")
+            self._update_time_label()
+            
+            # Read first frame
+            self.active_frame = self.video_reader.read_frame(0)
+            self._update_preview()
+            
+            self.statusBar().showMessage(f"Loaded {os.path.basename(filepath)}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Video Load Error", f"Could not load video: {str(e)}")
+            self.statusBar().showMessage("Video loading failed")
+            
+        self.open_video_btn.setEnabled(True)
+
+    def _on_sync_resolve(self):
+        # Stop webcam if running
+        if self.webcam_thread is not None:
+            self._on_toggle_webcam()
+            
+        self.statusBar().showMessage("Connecting to DaVinci Resolve...")
+        try:
+            import sys
+            import os
+            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if root_dir not in sys.path:
+                sys.path.append(root_dir)
                 
-                # Setup seekbar slider
-                self.scrub_bar.setEnabled(True)
-                self.scrub_bar.setRange(0, self.video_reader.total_frames - 1)
-                self.scrub_bar.setValue(0)
-                
-                self.play_btn.setEnabled(True)
-                self.play_btn.setText("Play")
-                self.is_playing = False
-                
-                self.export_btn.setEnabled(True)
-                
-                # Update labels
-                self.fps_label.setText(f"Source FPS: {self.video_reader.fps:.2f} | {self.video_reader.width}x{self.video_reader.height}")
-                self._update_time_label()
-                
-                # Read first frame
-                self.active_frame = self.video_reader.read_frame(0)
-                self._update_preview()
-                
-                self.statusBar().showMessage(f"Loaded {os.path.basename(filepath)}")
-                
-            except Exception as e:
-                QMessageBox.critical(self, "Video Load Error", f"Could not load video: {str(e)}")
-                self.statusBar().showMessage("Video loading failed")
-                
-            self.open_video_btn.setEnabled(True)
+            from ResolveBeautyBridge import get_resolve_clip_path
+            clip_path = get_resolve_clip_path()
+            
+            if clip_path:
+                self.load_video_from_path(clip_path)
+            else:
+                QMessageBox.warning(
+                    self, "Resolve Sync Error",
+                    "Could not sync clip from Resolve.\n\n"
+                    "Please make sure DaVinci Resolve is running, a project is open, "
+                    "a timeline is active, and external scripting is enabled in "
+                    "Preferences > System > General > External scripting using: Local."
+                )
+        except Exception as e:
+            QMessageBox.critical(self, "Sync Error", f"Failed to connect to Resolve: {str(e)}")
+
+    def _on_export_alpha_toggled(self, state):
+        if state == 2:  # Checked
+            idx = self.codec_combo.findText("ProRes (4444 Alpha)")
+            if idx >= 0:
+                self.codec_combo.setCurrentIndex(idx)
+
+    def _on_codec_changed(self, text):
+        if text != "ProRes (4444 Alpha)":
+            self.export_alpha_checkbox.blockSignals(True)
+            self.export_alpha_checkbox.setChecked(False)
+            self.export_alpha_checkbox.blockSignals(False)
+        else:
+            self.export_alpha_checkbox.blockSignals(True)
+            self.export_alpha_checkbox.setChecked(True)
+            self.export_alpha_checkbox.blockSignals(False)
 
     def _on_toggle_webcam(self):
         # If webcam is running, turn it off
@@ -695,78 +775,6 @@ class MainWindow(QMainWindow):
             self.webcam_thread.error.connect(self._on_webcam_error)
             self.webcam_thread.start()
 
-    def _on_webcam_frame(self, q_img, raw_frame):
-        # For split comparison screen in webcam mode, we need the original BGR
-        # frame and the processed image as BGR frame.
-        # Since WebcamThread emits the raw BGR frame and we already have the filters engine, 
-        # let's write a fast processing path.
-        # However, to avoid double mesh processing, we can let WebcamThread emit BOTH the raw frame
-        # and the processed QImage. To build the BeforeAfterViewer, it expects both NumPy arrays (BGR).
-        # Let's modify the viewer to support setting a direct processed BGR frame as well!
-        # Actually, in processor.py, WebcamThread emits (QImage, BGR original).
-        # We can construct the processed BGR frame in BeforeAfterViewer by converting QImage to numpy,
-        # or we can pass raw and processed NumPy frames from the WebcamThread.
-        # Let's see: in processor.py, processed is BGR! And it's already computed!
-        # Let's update processor.py if we need to. Wait, in processor.py:
-        # self.frame_ready.emit(q_img.copy(), frame)
-        # Here frame is the original BGR frame. We can convert the processed BGR image to NumPy!
-        # Wait, inside processor.py:
-        # `processed` is the BGR NumPy processed frame.
-        # We could modify WebcamThread to emit (BGR original, BGR processed). This is much cleaner!
-        # Let's look at what we wrote in processor.py:
-        # `self.frame_ready.emit(q_img.copy(), frame)`
-        # Ah, we emitted `q_img` and original BGR `frame`.
-        # To get the processed BGR NumPy array in the UI, we can just process it or change the signal.
-        # Let's write a small conversion or just modify WebcamThread to emit both NumPy arrays.
-        # Wait! In PyQt, emitting large NumPy arrays can occasionally be slow if done too rapidly,
-        # but is totally fine for 30fps.
-        # Let's just reconstruct the processed BGR image in the UI:
-        # Since the UI already has the original BGR raw_frame, we can just call self.filter_engine.process_frame on it,
-        # but wait, that would run the mesh twice (once in the thread and once in the UI). That is slow!
-        # Let's change the WebcamThread to emit the processed BGR array and original BGR array,
-        # or just convert the QImage back to BGR.
-        # Converting QImage back to BGR is very fast!
-        # But wait! We can also edit `core/processor.py` to make it emit `(np.ndarray, np.ndarray)`!
-        # Wait, the QImage can be drawn directly. If we look at the viewer:
-        # `self.viewer.set_frames(original, processed)` expects both to be numpy BGR arrays.
-        # So yes, let's just make the WebcamThread in `core/processor.py` emit `(np.ndarray, np.ndarray)` or let's convert `q_img` to BGR.
-        # Wait, converting QImage to numpy BGR:
-        # ```python
-        # width = q_img.width()
-        # height = q_img.height()
-        # ptr = q_img.bits()
-        # ptr.setsize(height * width * 4) # RGBA/RGB
-        # arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 4))
-        # ```
-        # Actually, let's just write a helper in main_window.py to convert:
-        # Or, even better, we can modify the viewer to accept both formats, or since we have `replace_file_content`
-        # we can easily modify the WebcamThread signal in `core/processor.py` to emit `(np.ndarray, np.ndarray)`!
-        # Wait, let's look at `core/processor.py`'s `WebcamThread` definition.
-        # The signal is: `frame_ready = pyqtSignal(QImage, np.ndarray)`
-        # If we change it to: `frame_ready = pyqtSignal(np.ndarray, np.ndarray)` (processed BGR, original BGR).
-        # Let's see if that is simpler.
-        # Wait! If we emit two numpy arrays, we can convert them to QImage inside the UI's paintEvent.
-        # In `ui/widgets.py`'s `BeforeAfterViewer.paintEvent`, it ALREADY converts BGR numpy arrays to QImage!
-        # Yes! `self.viewer.paintEvent` does:
-        # `q_original = self.numpy_to_qimage(self.original_frame)`
-        # `q_processed = self.numpy_to_qimage(self.processed_frame)`
-        # So yes! It expects BGR numpy arrays!
-        # Thus, if the WebcamThread simply emits two BGR NumPy arrays: `(processed BGR, original BGR)`,
-        # the main window can just do:
-        # `self.viewer.set_frames(original, processed)`
-        # This is incredibly clean! No QImage conversion in the thread, and the viewer does all the drawing conversion.
-        # Let's check: does it cause performance issues? No, NumPy arrays are just buffers, passing them via PyQt slots
-        # is very efficient on desktop.
-        # Let's modify `core/processor.py`'s `WebcamThread` to emit the processed BGR and original BGR.
-        # But wait! Let's first make sure if we can write main_window.py assuming we do that. Yes!
-        # In `main_window.py`:
-        # ```python
-        # def _on_webcam_frame(self, processed_frame, original_frame):
-        #     self.viewer.set_frames(original_frame, processed_frame)
-        # ```
-        # That is beautiful and simple!
-        pass
-        
     def _on_webcam_frame(self, processed_frame, original_frame):
         self.viewer.set_frames(original_frame, processed_frame)
         
@@ -933,8 +941,10 @@ class MainWindow(QMainWindow):
     def _set_export_ui_active(self, active):
         # Toggle buttons disable state to prevent concurrent modifications
         self.open_video_btn.setEnabled(not active)
+        self.sync_resolve_btn.setEnabled(not active)
         self.webcam_btn.setEnabled(not active)
         self.export_btn.setEnabled(not active)
+        self.export_alpha_checkbox.setEnabled(not active)
         self.save_preset_btn.setEnabled(not active)
         self.load_preset_btn.setEnabled(not active)
         self.preset_combo.setEnabled(not active)
@@ -1060,6 +1070,12 @@ class MainWindow(QMainWindow):
         
         file_menu.addSeparator()
         
+        export_lut_action = QAction("Export Look as 3D LUT (.cube)...", self)
+        export_lut_action.triggered.connect(self._on_export_lut)
+        file_menu.addAction(export_lut_action)
+        
+        file_menu.addSeparator()
+        
         save_preset_action = QAction("Save Preset As...", self)
         save_preset_action.setShortcut("Ctrl+S")
         save_preset_action.triggered.connect(self._on_save_preset)
@@ -1076,6 +1092,37 @@ class MainWindow(QMainWindow):
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+
+    def _on_export_lut(self):
+        params = self.get_slider_params()
+        filter_name = params.get('color_look', 'None')
+        intensity = params.get('look_intensity', 1.0)
+        
+        if filter_name == "None":
+            QMessageBox.warning(
+                self, "Export 3D LUT",
+                "No Cinematic Look filter is currently selected.\n"
+                "Please select a look from the 'Cinematic Looks' panel before exporting."
+            )
+            return
+            
+        default_name = filter_name.lower().replace(" ", "_") + ".cube"
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Export Look as 3D LUT", default_name,
+            "LUT Files (*.cube)"
+        )
+        
+        if filepath:
+            self.statusBar().showMessage("Generating 3D LUT...")
+            try:
+                self.filter_engine.generate_cube_lut(filter_name, intensity, filepath)
+                self.statusBar().showMessage(f"LUT exported: {os.path.basename(filepath)}")
+                QMessageBox.information(
+                    self, "LUT Export Successful",
+                    f"Successfully generated 3D LUT for look '{filter_name}' at:\n{filepath}"
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "LUT Export Error", f"Failed to export 3D LUT:\n{str(e)}")
         
         # 2. View Menu
         view_menu = menubar.addMenu("View")

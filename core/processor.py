@@ -10,7 +10,8 @@ CODEC_MAP = {
     "H.264 (MOV)": ("avc1", ".mov"),
     "ProRes (Standard)": ("apcn", ".mov"),
     "ProRes (HQ)": ("apch", ".mov"),
-    "DNxHD (MOV)": ("AVdn", ".mov")
+    "DNxHD (MOV)": ("AVdn", ".mov"),
+    "ProRes (4444 Alpha)": ("ap4h", ".mov")
 }
 
 class VideoProcessorThread(QThread):
@@ -52,29 +53,41 @@ class VideoProcessorThread(QThread):
                 return
 
             # Retrieve codec parameters
-            fourcc_str, ext = CODEC_MAP.get(self.codec_name, ("mp4v", ".mp4"))
-            fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
-            
-            # Ensure the output path matches the codec extension
+            is_prores_alpha = (self.codec_name == "ProRes (4444 Alpha)")
             base, _ = os.path.splitext(self.output_path)
-            actual_output_path = base + ext
             
-            # Initialize VideoWriter
-            writer = cv2.VideoWriter(actual_output_path, fourcc, fps, (width, height))
-            use_fallback = False
-            
-            if not writer.isOpened():
-                # Fallback to standard MP4 H.264
-                print(f"Failed to open with codec {fourcc_str}, falling back to standard H.264 (mp4v)...")
-                fourcc_str = "mp4v"
+            if is_prores_alpha:
+                import av
+                actual_output_path = base + ".mov"
+                container = av.open(actual_output_path, mode='w')
+                stream = container.add_stream('prores_ks', rate=fps)
+                stream.width = width
+                stream.height = height
+                stream.pix_fmt = 'yuva444p10le'
+                stream.options = {'profile': '4'}  # ProRes 4444 profile
+                writer = None
+                use_fallback = False
+            else:
+                fourcc_str, ext = CODEC_MAP.get(self.codec_name, ("mp4v", ".mp4"))
                 fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
-                actual_output_path = base + ".mp4"
+                actual_output_path = base + ext
+                
+                # Initialize VideoWriter
                 writer = cv2.VideoWriter(actual_output_path, fourcc, fps, (width, height))
-                use_fallback = True
+                use_fallback = False
+                
                 if not writer.isOpened():
-                    self.error.emit("Failed to initialize video writer with both primary and fallback codecs.")
-                    cap.release()
-                    return
+                    # Fallback to standard MP4 H.264
+                    print(f"Failed to open with codec {fourcc_str}, falling back to standard H.264 (mp4v)...")
+                    fourcc_str = "mp4v"
+                    fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+                    actual_output_path = base + ".mp4"
+                    writer = cv2.VideoWriter(actual_output_path, fourcc, fps, (width, height))
+                    use_fallback = True
+                    if not writer.isOpened():
+                        self.error.emit("Failed to initialize video writer with both primary and fallback codecs.")
+                        cap.release()
+                        return
             
             start_time = time.time()
             frame_idx = 0
@@ -85,10 +98,21 @@ class VideoProcessorThread(QThread):
                     break
                     
                 # Process the frame
-                processed_frame = self.filter_engine.process_frame(frame, self.params)
+                params_copy = self.params.copy()
+                if is_prores_alpha:
+                    params_copy['export_alpha'] = True
+                    
+                processed_frame = self.filter_engine.process_frame(frame, params_copy)
                 
                 # Write frame
-                writer.write(processed_frame)
+                if is_prores_alpha:
+                    # Convert BGR(A) to RGBA for PyAV
+                    frame_rgba = cv2.cvtColor(processed_frame, cv2.COLOR_BGRA2RGBA)
+                    av_frame = av.VideoFrame.from_ndarray(frame_rgba, format='rgba')
+                    for packet in stream.encode(av_frame):
+                        container.mux(packet)
+                else:
+                    writer.write(processed_frame)
                 
                 frame_idx += 1
                 
@@ -109,7 +133,13 @@ class VideoProcessorThread(QThread):
                     
                 self.progress.emit(frame_idx, percentage, eta_str)
                 
-            writer.release()
+            if is_prores_alpha:
+                # Flush the stream
+                for packet in stream.encode():
+                    container.mux(packet)
+                container.close()
+            else:
+                writer.release()
             cap.release()
             
             if self._is_running:

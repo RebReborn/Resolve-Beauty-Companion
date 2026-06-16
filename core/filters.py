@@ -70,6 +70,14 @@ class BeautyFilterEngine:
         processed = image.copy()
         h, w = processed.shape[:2]
         
+        export_alpha = params.get('export_alpha', False)
+        if export_alpha:
+            accum_alpha = np.zeros((h, w), dtype=np.float32)
+            accum_color = np.zeros((h, w, 3), dtype=np.float32)
+            accumulators = (accum_color, accum_alpha)
+        else:
+            accumulators = None
+            
         # Initialize temporal history tracking maps for current frame
         self.new_history_raw = {}
         self.new_history_warped = {}
@@ -82,6 +90,10 @@ class BeautyFilterEngine:
         results = self.landmarker.detect(mp_image)
         
         if not results.face_landmarks:
+            if export_alpha:
+                self.face_history_raw = {}
+                self.face_history_warped = {}
+                return np.zeros((h, w, 4), dtype=np.uint8)
             # Still apply color looks if no face is detected
             color_look = params.get('color_look', 'None')
             if color_look != 'None':
@@ -113,6 +125,10 @@ class BeautyFilterEngine:
             warped_mp = mp.Image(image_format=mp.ImageFormat.SRGB, data=warped_rgb)
             results = self.landmarker.detect(warped_mp)
             if not results.face_landmarks:
+                if export_alpha:
+                    self.face_history_raw = self.new_history_raw
+                    self.face_history_warped = {}
+                    return np.zeros((h, w, 4), dtype=np.uint8)
                 # Fallback: color look and return
                 color_look = params.get('color_look', 'None')
                 if color_look != 'None':
@@ -135,37 +151,51 @@ class BeautyFilterEngine:
             
             # 3. Apply skin brightening
             if params.get('skin_brightening', 0.0) > 0.001:
-                processed = self.apply_skin_brightening(processed, skin_mask, params['skin_brightening'])
+                processed = self.apply_skin_brightening(processed, skin_mask, params['skin_brightening'], accumulators=accumulators)
             
             # 4. Apply skin smoothing (with high-pass texture recovery)
             if params.get('skin_smoothing', 0.0) > 0.001:
                 texture_rec = params.get('skin_texture_recovery', 0.0)
-                processed = self.apply_skin_smoothing(processed, skin_mask, params['skin_smoothing'], texture_rec)
+                processed = self.apply_skin_smoothing(processed, skin_mask, params['skin_smoothing'], texture_rec, accumulators=accumulators)
                 
             # 5. Apply blush / warmth to cheeks
             if params.get('blush_warmth', 0.0) > 0.001:
-                processed = self.apply_blush(processed, coords, params['blush_warmth'])
+                processed = self.apply_blush(processed, coords, params['blush_warmth'], accumulators=accumulators)
                 
             # 6. Apply under-eye lighten
             if params.get('undereye_lighten', 0.0) > 0.001:
-                processed = self.apply_undereye_lighten(processed, coords, None, params['undereye_lighten'])
+                processed = self.apply_undereye_lighten(processed, coords, None, params['undereye_lighten'], accumulators=accumulators)
                 
             # 7. Apply eye enhancement (contrast & clarity)
             if params.get('eye_enhancement', 0.0) > 0.001:
-                processed = self.apply_eye_enhancement(processed, coords, params['eye_enhancement'])
+                processed = self.apply_eye_enhancement(processed, coords, params['eye_enhancement'], accumulators=accumulators)
                 
             # 7.5. Apply lips color makeup tint (lipstick overlay)
             lip_shade = params.get('lipstick_shade', 'None')
             lip_strength = params.get('lipstick_strength', 0.0)
             if lip_shade != 'None' and lip_strength > 0.001:
-                processed = self.apply_lipstick(processed, coords, lip_strength, lip_shade)
+                processed = self.apply_lipstick(processed, coords, lip_strength, lip_shade, accumulators=accumulators)
                 
             # 7.6. Apply eye color makeup tint (colored contact lenses)
             eye_color = params.get('eye_color_shade', 'Natural')
             eye_color_strength = params.get('eye_color_strength', 0.0)
             if eye_color != 'Natural' and eye_color_strength > 0.001:
-                processed = self.apply_eye_color(processed, coords, eye_color_strength, eye_color)
+                processed = self.apply_eye_color(processed, coords, eye_color_strength, eye_color, accumulators=accumulators)
         
+        if export_alpha:
+            bgra = np.zeros((h, w, 4), dtype=np.uint8)
+            safe_alpha = np.where(accum_alpha > 0.0001, accum_alpha, 1.0)
+            safe_alpha_3d = np.expand_dims(safe_alpha, axis=2)
+            bgra_rgb = accum_color / safe_alpha_3d
+            
+            bgra[:, :, :3] = np.clip(bgra_rgb, 0, 255).astype(np.uint8)
+            bgra[:, :, 3] = np.clip(accum_alpha * 255.0, 0, 255).astype(np.uint8)
+            
+            # Update history tracking logs
+            self.face_history_raw = self.new_history_raw
+            self.face_history_warped = self.new_history_warped
+            return bgra
+
         # 8. Apply color looks
         color_look = params.get('color_look', 'None')
         if color_look != 'None':
@@ -269,7 +299,7 @@ class BeautyFilterEngine:
         
         return feathered_mask
 
-    def apply_skin_smoothing(self, image, skin_mask, strength, texture_recovery=0.0):
+    def apply_skin_smoothing(self, image, skin_mask, strength, texture_recovery=0.0, accumulators=None):
         d = int(5 + 10 * strength)
         sigma_color = int(10 + 110 * strength)
         sigma_space = int(10 + 110 * strength)
@@ -281,19 +311,26 @@ class BeautyFilterEngine:
         
         smoothed_output = (image * (1.0 - blend_factor) + smoothed * blend_factor)
         
-        # High-pass texture extraction & recovery
         if texture_recovery > 0.001:
             blurred = cv2.GaussianBlur(image, (3, 3), 0)
             detail = image.astype(np.float32) - blurred.astype(np.float32)
             reinjected_detail = detail * blend_factor * texture_recovery
             final_output = smoothed_output.astype(np.float32) + reinjected_detail
             output = np.clip(final_output, 0, 255).astype(np.uint8)
+            target_color = smoothed.astype(np.float32) + detail * texture_recovery
         else:
             output = smoothed_output.astype(np.uint8)
+            target_color = smoothed.astype(np.float32)
+            
+        if accumulators is not None:
+            accum_color, accum_alpha = accumulators
+            blend_1d = skin_mask * strength * 0.92
+            accum_color[:] = accum_color * (1.0 - blend_factor) + target_color * blend_factor
+            accum_alpha[:] = accum_alpha * (1.0 - blend_1d) + blend_1d
             
         return output
 
-    def apply_skin_brightening(self, image, skin_mask, strength):
+    def apply_skin_brightening(self, image, skin_mask, strength, accumulators=None):
         ycrcb = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)
         Y, Cr, Cb = cv2.split(ycrcb)
         
@@ -302,9 +339,16 @@ class BeautyFilterEngine:
         Y_new = np.clip(Y_float, 0, 255).astype(np.uint8)
         
         brightened = cv2.cvtColor(cv2.merge([Y_new, Cr, Cb]), cv2.COLOR_YCrCb2BGR)
+        
+        if accumulators is not None:
+            accum_color, accum_alpha = accumulators
+            mask_3d = np.expand_dims(skin_mask, axis=2)
+            accum_color[:] = accum_color * (1.0 - mask_3d) + brightened.astype(np.float32) * mask_3d
+            accum_alpha[:] = accum_alpha * (1.0 - skin_mask) + skin_mask
+            
         return brightened
 
-    def apply_blush(self, image, coords, strength):
+    def apply_blush(self, image, coords, strength, accumulators=None):
         h, w = image.shape[:2]
         
         left_cheek = coords[117]
@@ -328,9 +372,16 @@ class BeautyFilterEngine:
         blend_factor = cheek_mask_3d * strength * 0.35
         
         output = (image * (1.0 - blend_factor) + blush_color * blend_factor).astype(np.uint8)
+        
+        if accumulators is not None:
+            accum_color, accum_alpha = accumulators
+            blend_1d = cheek_mask * strength * 0.35
+            accum_color[:] = accum_color * (1.0 - cheek_mask_3d) + blush_color * blend_factor
+            accum_alpha[:] = accum_alpha * (1.0 - blend_1d) + blend_1d
+            
         return output
 
-    def apply_undereye_lighten(self, image, coords, raw_landmarks, strength):
+    def apply_undereye_lighten(self, image, coords, raw_landmarks, strength, accumulators=None):
         h, w = image.shape[:2]
         
         left_eye_height = np.linalg.norm(coords[159] - coords[145])
@@ -372,9 +423,16 @@ class BeautyFilterEngine:
         Cb_new = np.clip(Cb_float, 0, 255).astype(np.uint8)
         
         output = cv2.cvtColor(cv2.merge([Y_new, Cr_new, Cb_new]), cv2.COLOR_YCrCb2BGR)
+        
+        if accumulators is not None:
+            accum_color, accum_alpha = accumulators
+            mask_3d = np.expand_dims(undereye_mask_feathered, axis=2)
+            accum_color[:] = accum_color * (1.0 - mask_3d) + output.astype(np.float32) * mask_3d
+            accum_alpha[:] = accum_alpha * (1.0 - undereye_mask_feathered) + undereye_mask_feathered
+            
         return output
 
-    def apply_eye_enhancement(self, image, coords, strength):
+    def apply_eye_enhancement(self, image, coords, strength, accumulators=None):
         h, w = image.shape[:2]
         
         eye_mask = np.zeros((h, w), dtype=np.uint8)
@@ -408,6 +466,12 @@ class BeautyFilterEngine:
         sharpened = np.clip(sharpened, 0, 255).astype(np.uint8)
         
         output = (contrast_enhanced * (1.0 - eye_mask_3d) + sharpened * eye_mask_3d).astype(np.uint8)
+        
+        if accumulators is not None:
+            accum_color, accum_alpha = accumulators
+            accum_color[:] = accum_color * (1.0 - eye_mask_3d) + output.astype(np.float32) * eye_mask_3d
+            accum_alpha[:] = accum_alpha * (1.0 - eye_mask_feathered) + eye_mask_feathered
+            
         return output
 
     # ==========================================
@@ -620,7 +684,7 @@ class BeautyFilterEngine:
     # ==========================================
     # MAKEUP TINTS ENGINE (Lips & Eyes Color)
     # ==========================================
-    def apply_lipstick(self, image, coords, strength, color_shade):
+    def apply_lipstick(self, image, coords, strength, color_shade, accumulators=None):
         h, w = image.shape[:2]
         
         # Lips mask
@@ -644,9 +708,16 @@ class BeautyFilterEngine:
         # Blend lipstick color (max opacity 55% at strength 1.0)
         blend_factor = lips_mask_3d * strength * 0.55
         output = (image * (1.0 - blend_factor) + lipstick_color * blend_factor).astype(np.uint8)
+        
+        if accumulators is not None:
+            accum_color, accum_alpha = accumulators
+            blend_1d = lips_mask * strength * 0.55
+            accum_color[:] = accum_color * (1.0 - blend_factor) + lipstick_color * blend_factor
+            accum_alpha[:] = accum_alpha * (1.0 - blend_1d) + blend_1d
+            
         return output
 
-    def apply_eye_color(self, image, coords, strength, color_shade):
+    def apply_eye_color(self, image, coords, strength, color_shade, accumulators=None):
         h, w = image.shape[:2]
         
         # Irises landmarks: left 474-477, right 469-472
@@ -677,4 +748,46 @@ class BeautyFilterEngine:
         # Blend contacts color (max opacity 45% at strength 1.0)
         blend_factor = iris_mask_3d * strength * 0.45
         output = (image * (1.0 - blend_factor) + iris_color * blend_factor).astype(np.uint8)
+        
+        if accumulators is not None:
+            accum_color, accum_alpha = accumulators
+            blend_1d = iris_mask * strength * 0.45
+            accum_color[:] = accum_color * (1.0 - blend_factor) + iris_color * blend_factor
+            accum_alpha[:] = accum_alpha * (1.0 - blend_1d) + blend_1d
+            
         return output
+
+    def generate_cube_lut(self, filter_name, intensity, filepath):
+        """
+        Generates a standard 33x33x33 3D LUT from a color look filter
+        and writes it as a .cube file.
+        """
+        lut_size = 33
+        lut_grid = np.zeros((1, lut_size * lut_size * lut_size, 3), dtype=np.uint8)
+        
+        idx = 0
+        for r_idx in range(lut_size):
+            r_val = int(r_idx * 255.0 / (lut_size - 1) + 0.5)
+            for g_idx in range(lut_size):
+                g_val = int(g_idx * 255.0 / (lut_size - 1) + 0.5)
+                for b_idx in range(lut_size):
+                    b_val = int(b_idx * 255.0 / (lut_size - 1) + 0.5)
+                    lut_grid[0, idx] = [b_val, g_val, r_val]
+                    idx += 1
+                    
+        # Apply the color lookup filter
+        lut_processed = self.apply_color_filter(lut_grid, filter_name, intensity)
+        
+        # Write .cube format
+        with open(filepath, "w") as f:
+            f.write("# Created by DaVinci Resolve Beauty Companion\n")
+            f.write(f"LUT_3D_SIZE {lut_size}\n")
+            f.write("DOMAIN_MIN 0.0 0.0 0.0\n")
+            f.write("DOMAIN_MAX 1.0 1.0 1.0\n")
+            
+            for idx in range(lut_size * lut_size * lut_size):
+                b, g, r = lut_processed[0, idx]
+                r_f = r / 255.0
+                g_f = g / 255.0
+                b_f = b / 255.0
+                f.write(f"{r_f:.6f} {g_f:.6f} {b_f:.6f}\n")

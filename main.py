@@ -12,7 +12,8 @@ def main():
     # Fusion style is standard, clean, and easily stylable via stylesheet
     app.setStyle('Fusion')
     
-    window = MainWindow()
+    clip_path = sys.argv[1] if len(sys.argv) > 1 else None
+    window = MainWindow(clip_path=clip_path)
     window.show()
     
     sys.exit(app.exec())
