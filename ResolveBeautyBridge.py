@@ -3,6 +3,12 @@ import os
 import subprocess
 
 def get_resolve_clip_path():
+    # Dynamically set scripting paths if missing
+    if not os.getenv("RESOLVE_SCRIPT_LIB"):
+        os.environ["RESOLVE_SCRIPT_LIB"] = r"C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll"
+    if not os.getenv("RESOLVE_SCRIPT_API"):
+        os.environ["RESOLVE_SCRIPT_API"] = r"C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting"
+
     # Attempt to import scripting module
     try:
         import DaVinciResolveScript as dvr
