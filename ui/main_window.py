@@ -326,6 +326,11 @@ class MainWindow(QMainWindow):
         self.export_alpha_checkbox.stateChanged.connect(self._on_export_alpha_toggled)
         export_layout.addWidget(self.export_alpha_checkbox)
         
+        self.gpu_checkbox = QCheckBox("Enable GPU Acceleration (DirectML ONNX)")
+        self.gpu_checkbox.setStyleSheet(self.export_alpha_checkbox.styleSheet())
+        self.gpu_checkbox.stateChanged.connect(self._on_slider_changed)
+        export_layout.addWidget(self.gpu_checkbox)
+        
         self.export_btn = QPushButton("Export Video")
         self.export_btn.setStyleSheet("""
             QPushButton {
@@ -583,7 +588,8 @@ class MainWindow(QMainWindow):
             "eyeshadow_shade": self.eyeshadow_combo.currentText(),
             "eyeshadow_strength": self.slider_eyeshadow_strength.value(),
             "lip_gloss_strength": self.slider_lip_gloss_strength.value(),
-            "facial_highlighter_strength": self.slider_facial_highlighter_strength.value()
+            "facial_highlighter_strength": self.slider_facial_highlighter_strength.value(),
+            "gpu_acceleration": self.gpu_checkbox.isChecked()
         }
         
     def update_sliders_ui(self, params):
@@ -610,6 +616,7 @@ class MainWindow(QMainWindow):
         self.slider_eyeshadow_strength.blockSignals(True)
         self.slider_lip_gloss_strength.blockSignals(True)
         self.slider_facial_highlighter_strength.blockSignals(True)
+        self.gpu_checkbox.blockSignals(True)
         
         self.slider_smoothing.setValue(params.get("skin_smoothing", 0.0))
         self.slider_texture_recovery.setValue(params.get("skin_texture_recovery", 0.0))
@@ -634,6 +641,7 @@ class MainWindow(QMainWindow):
         self.slider_eyeshadow_strength.setValue(params.get("eyeshadow_strength", 0.0))
         self.slider_lip_gloss_strength.setValue(params.get("lip_gloss_strength", 0.0))
         self.slider_facial_highlighter_strength.setValue(params.get("facial_highlighter_strength", 0.0))
+        self.gpu_checkbox.setChecked(params.get("gpu_acceleration", False))
         
         self.slider_smoothing.blockSignals(False)
         self.slider_texture_recovery.blockSignals(False)
@@ -657,6 +665,7 @@ class MainWindow(QMainWindow):
         self.slider_eyeshadow_strength.blockSignals(False)
         self.slider_lip_gloss_strength.blockSignals(False)
         self.slider_facial_highlighter_strength.blockSignals(False)
+        self.gpu_checkbox.blockSignals(False)
         
         # Redraw screen
         self._update_preview()
@@ -1484,6 +1493,14 @@ class InstructionManualDialog(QDialog):
             </li>
             <li>Restart Resolve and select: <b>Workspace > Scripts > ResolveBeautyBridge</b>.</li>
         </ol>
+
+        <h2>6. ONNX DirectML GPU Acceleration</h2>
+        <p>For high-resolution 4K timelines or heavy presets, enable GPU acceleration:</p>
+        <ul>
+            <li>Check <b>Enable GPU Acceleration (DirectML ONNX)</b> in the export panel.</li>
+            <li>This offloads face mesh landmark estimation from the CPU to the GPU using Microsoft DirectML, compatible with AMD, Intel, and NVIDIA graphics processors.</li>
+            <li>A seamless automatic fallback to standard MediaPipe CPU is built-in if no compatible DirectX 12 graphics processor is detected or if initialization fails.</li>
+        </ul>
         </body>
         </html>
         """

@@ -3,3 +3,4 @@ opencv-python>=4.7.0
 mediapipe>=0.10.0
 numpy>=1.22.0
 scipy>=1.10.0
+onnxruntime-directml>=1.15.0

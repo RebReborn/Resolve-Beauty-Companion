@@ -27,3 +27,12 @@ test_setup.py
 *.mkv
 *.mxf
 *.webm
+
+# ONNX Models & weights
+core/*.onnx
+core/*.data
+*.onnx
+*.data
+
+# Local test scripts
+test_*.py

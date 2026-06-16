@@ -38,6 +38,7 @@ class BeautyFilterEngine:
             num_faces=2
         )
         self.landmarker = vision.FaceLandmarker.create_from_options(options)
+        self.onnx_detector = None
         
         # Temporal landmark tracking history for raw and warped passes (anti-jitter)
         self.face_history_raw = {}
@@ -82,14 +83,38 @@ class BeautyFilterEngine:
         self.new_history_raw = {}
         self.new_history_warped = {}
         
-        # Convert OpenCV BGR image to RGB order and wrap in mp.Image
-        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
+        # Check if GPU acceleration is enabled and set up ONNX detector if needed
+        use_gpu = params.get('gpu_acceleration', False)
+        onnx_success = False
+        raw_faces_landmarks = None
         
-        # Run synchronous landmark inference
-        results = self.landmarker.detect(mp_image)
-        
-        if not results.face_landmarks:
+        if use_gpu:
+            if self.onnx_detector is None:
+                try:
+                    from core.onnx_landmarker import ONNXFaceMeshDetector
+                    self.onnx_detector = ONNXFaceMeshDetector()
+                except Exception as e:
+                    print(f"Failed to initialize ONNX FaceMesh detector: {e}. Falling back to MediaPipe CPU.")
+                    self.onnx_detector = None
+            
+            if self.onnx_detector is not None:
+                try:
+                    onnx_landmarks = self.onnx_detector.detect(image)
+                    raw_faces_landmarks = onnx_landmarks
+                    onnx_success = True
+                except Exception as e:
+                    print(f"ONNX detection failed: {e}. Falling back to MediaPipe CPU.")
+                    onnx_success = False
+                    
+        if not onnx_success:
+            # Convert OpenCV BGR image to RGB order and wrap in mp.Image
+            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
+            # Run synchronous landmark inference using MediaPipe CPU
+            results = self.landmarker.detect(mp_image)
+            raw_faces_landmarks = results.face_landmarks if results else []
+
+        if not raw_faces_landmarks:
             if export_alpha:
                 self.face_history_raw = {}
                 self.face_history_warped = {}
@@ -105,7 +130,7 @@ class BeautyFilterEngine:
             
         # Smooth raw landmarks coordinates
         raw_faces_coords = []
-        for face_landmarks in results.face_landmarks:
+        for face_landmarks in raw_faces_landmarks:
             coords = self.get_smoothed_coords(face_landmarks, w, h, channel='raw')
             raw_faces_coords.append(coords)
             
@@ -121,10 +146,22 @@ class BeautyFilterEngine:
             processed = self.apply_reshape_warps(processed, raw_faces_coords, nose_r, cheeks_r, forehead_r, eye_e, lips_p)
             
             # Re-detect landmarks on warped image to ensure exact filter overlays
-            warped_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
-            warped_mp = mp.Image(image_format=mp.ImageFormat.SRGB, data=warped_rgb)
-            results = self.landmarker.detect(warped_mp)
-            if not results.face_landmarks:
+            warped_faces_landmarks = None
+            if onnx_success and self.onnx_detector is not None:
+                try:
+                    warped_landmarks = self.onnx_detector.detect(processed)
+                    if warped_landmarks:
+                        warped_faces_landmarks = warped_landmarks
+                except Exception as e:
+                    print(f"ONNX detection on warped image failed: {e}. Falling back to MediaPipe CPU.")
+            
+            if warped_faces_landmarks is None:
+                warped_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
+                warped_mp = mp.Image(image_format=mp.ImageFormat.SRGB, data=warped_rgb)
+                results = self.landmarker.detect(warped_mp)
+                warped_faces_landmarks = results.face_landmarks if results else []
+                
+            if not warped_faces_landmarks:
                 if export_alpha:
                     self.face_history_raw = self.new_history_raw
                     self.face_history_warped = {}
@@ -137,10 +174,12 @@ class BeautyFilterEngine:
                 self.face_history_raw = self.new_history_raw
                 self.face_history_warped = {}
                 return processed
-                
+        else:
+            warped_faces_landmarks = raw_faces_landmarks
+            
         # Smooth warped landmarks coordinates
         warped_faces_coords = []
-        for face_landmarks in results.face_landmarks:
+        for face_landmarks in warped_faces_landmarks:
             coords = self.get_smoothed_coords(face_landmarks, w, h, channel='warped')
             warped_faces_coords.append(coords)
             
@@ -234,7 +273,10 @@ class BeautyFilterEngine:
         an Exponential Moving Average (EMA) to eliminate frame-to-frame wiggles.
         """
         # Convert landmarks to pixel coordinates
-        coords = np.array([(float(l.x * w), float(l.y * h)) for l in face_landmarks], dtype=np.float32)
+        if isinstance(face_landmarks, np.ndarray):
+            coords = face_landmarks.copy()
+        else:
+            coords = np.array([(float(l.x * w), float(l.y * h)) for l in face_landmarks], dtype=np.float32)
         centroid = np.mean(coords, axis=0)
         
         # Calculate face scale
