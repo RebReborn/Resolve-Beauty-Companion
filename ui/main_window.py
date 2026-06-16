@@ -1092,6 +1092,32 @@ class MainWindow(QMainWindow):
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+        
+        # 2. View Menu
+        view_menu = menubar.addMenu("View")
+        
+        split_action = QAction("Split Screen Mode", self)
+        split_action.triggered.connect(lambda: self._set_compare_mode("split"))
+        view_menu.addAction(split_action)
+        
+        filtered_action = QAction("Filtered (After) Mode", self)
+        filtered_action.triggered.connect(lambda: self._set_compare_mode("processed"))
+        view_menu.addAction(filtered_action)
+        
+        original_action = QAction("Original (Before) Mode", self)
+        original_action.triggered.connect(lambda: self._set_compare_mode("original"))
+        view_menu.addAction(original_action)
+        
+        # 3. Help Menu
+        help_menu = menubar.addMenu("Help")
+        
+        shortcuts_action = QAction("Shortcuts Reference...", self)
+        shortcuts_action.triggered.connect(self._on_shortcuts_triggered)
+        help_menu.addAction(shortcuts_action)
+        
+        about_action = QAction("About Resolve Beauty Companion...", self)
+        about_action.triggered.connect(self._on_about_triggered)
+        help_menu.addAction(about_action)
 
     def _on_export_lut(self):
         params = self.get_slider_params()
@@ -1123,32 +1149,6 @@ class MainWindow(QMainWindow):
                 )
             except Exception as e:
                 QMessageBox.critical(self, "LUT Export Error", f"Failed to export 3D LUT:\n{str(e)}")
-        
-        # 2. View Menu
-        view_menu = menubar.addMenu("View")
-        
-        split_action = QAction("Split Screen Mode", self)
-        split_action.triggered.connect(lambda: self._set_compare_mode("split"))
-        view_menu.addAction(split_action)
-        
-        filtered_action = QAction("Filtered (After) Mode", self)
-        filtered_action.triggered.connect(lambda: self._set_compare_mode("processed"))
-        view_menu.addAction(filtered_action)
-        
-        original_action = QAction("Original (Before) Mode", self)
-        original_action.triggered.connect(lambda: self._set_compare_mode("original"))
-        view_menu.addAction(original_action)
-        
-        # 3. Help Menu
-        help_menu = menubar.addMenu("Help")
-        
-        shortcuts_action = QAction("Shortcuts Reference...", self)
-        shortcuts_action.triggered.connect(self._on_shortcuts_triggered)
-        help_menu.addAction(shortcuts_action)
-        
-        about_action = QAction("About Resolve Beauty Companion...", self)
-        about_action.triggered.connect(self._on_about_triggered)
-        help_menu.addAction(about_action)
 
     def _on_about_triggered(self):
         QMessageBox.about(
